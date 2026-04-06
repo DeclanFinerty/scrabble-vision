@@ -1,0 +1,456 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Scrabble Scanner</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, sans-serif; background: #1a1a1a; color: #fff;
+         touch-action: manipulation; }
+
+  .camera-wrap {
+    position: relative;
+    width: 100vw;
+    max-width: 600px;
+    margin: 0 auto;
+    aspect-ratio: 1;
+    background: #000;
+  }
+  .camera-wrap video, .camera-wrap img {
+    width: 100%; height: 100%; object-fit: cover;
+    display: block;
+  }
+  .camera-wrap canvas {
+    position: absolute; top: 0; left: 0;
+    width: 100%; height: 100%;
+  }
+
+  .controls {
+    display: flex; gap: 10px; justify-content: center;
+    padding: 14px; flex-wrap: wrap;
+  }
+  button {
+    padding: 12px 24px; font-size: 15px; font-weight: 600;
+    border: none; border-radius: 8px; cursor: pointer;
+    background: #4CAF50; color: #fff;
+  }
+  button:disabled { opacity: 0.4; }
+  button.secondary { background: #555; }
+  button.blue { background: #2196F3; }
+  button.red { background: #c0392b; }
+
+  .status { text-align: center; padding: 8px; font-size: 14px; color: #aaa; }
+
+  .board-section {
+    max-width: 600px; margin: 0 auto; padding: 8px; display: none;
+  }
+  .board-section.visible { display: block; }
+  .board-grid {
+    display: grid; grid-template-columns: repeat(15, 1fr);
+    gap: 1px; background: #333; border: 2px solid #555;
+  }
+  .board-grid input {
+    width: 100%; aspect-ratio: 1; text-align: center;
+    font-size: min(3.5vw, 18px); font-weight: 700;
+    border: none; padding: 0; background: #2a2a2a; color: #fff;
+  }
+  .board-grid input.has-tile { background: #3a3520; color: #f5deb3; }
+  .board-grid input.uncertain { background: #4a3520; color: #ffaa44; }
+  .board-grid input:focus { outline: 2px solid #4CAF50; z-index: 1; }
+
+  .stats { text-align: center; padding: 12px; font-size: 13px; color: #888; }
+  #file-input { display: none; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+
+<div class="camera-wrap" id="camera-wrap">
+  <video id="video" autoplay playsinline muted></video>
+  <img id="preview-img" class="hidden" />
+  <canvas id="overlay"></canvas>
+</div>
+
+<div class="controls" id="camera-controls">
+  <button id="capture-btn" disabled>Capture</button>
+  <button id="upload-btn" class="blue">Upload</button>
+</div>
+
+<div class="controls hidden" id="align-controls">
+  <button id="scan-btn">Scan</button>
+  <button id="retake-btn" class="secondary">Retake</button>
+</div>
+
+<div class="status" id="status">Starting camera...</div>
+
+<input type="file" id="file-input" accept="image/*">
+
+<div class="board-section" id="board-section">
+  <div class="board-grid" id="board-grid"></div>
+  <div class="stats" id="stats"></div>
+  <div class="controls">
+    <button id="new-scan-btn" class="secondary">New Scan</button>
+  </div>
+</div>
+
+<canvas id="capture-canvas" style="display:none"></canvas>
+
+<script>
+const $ = id => document.getElementById(id);
+const video = $('video');
+const previewImg = $('preview-img');
+const overlay = $('overlay');
+const captureBtn = $('capture-btn');
+const uploadBtn = $('upload-btn');
+const scanBtn = $('scan-btn');
+const retakeBtn = $('retake-btn');
+const newScanBtn = $('new-scan-btn');
+const status = $('status');
+const boardSection = $('board-section');
+const boardGrid = $('board-grid');
+const statsEl = $('stats');
+const captureCanvas = $('capture-canvas');
+const fileInput = $('file-input');
+const cameraControls = $('camera-controls');
+const alignControls = $('align-controls');
+
+let currentBlob = null;
+let imageWidth = 0;
+let imageHeight = 0;
+// Corners in image coordinates: [TL, TR, BR, BL]
+let corners = null;
+let dragging = -1;
+const GRAB_RADIUS = 30;
+
+// ── State management ──
+
+function showCamera() {
+  video.classList.remove('hidden');
+  previewImg.classList.add('hidden');
+  cameraControls.classList.remove('hidden');
+  alignControls.classList.add('hidden');
+  boardSection.classList.remove('visible');
+  overlay.getContext('2d').clearRect(0, 0, overlay.width, overlay.height);
+  overlay.style.pointerEvents = 'none';
+  corners = null;
+  currentBlob = null;
+  setupOverlay();
+  drawCameraGrid();
+  status.textContent = 'Align board with grid, then tap Capture';
+}
+
+function showAlign(imgUrl) {
+  video.classList.add('hidden');
+  previewImg.classList.remove('hidden');
+  previewImg.src = imgUrl;
+  cameraControls.classList.add('hidden');
+  alignControls.classList.remove('hidden');
+  boardSection.classList.remove('visible');
+  overlay.style.pointerEvents = 'auto';
+  status.textContent = 'Detecting board...';
+
+  previewImg.onload = () => {
+    setupOverlay();
+    detectCorners();
+  };
+}
+
+// ── Camera ──
+
+async function startCamera() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 1280 } }
+    });
+    video.srcObject = stream;
+    video.addEventListener('loadedmetadata', () => {
+      setupOverlay();
+      drawCameraGrid();
+      captureBtn.disabled = false;
+      status.textContent = 'Align board with grid, then tap Capture';
+    });
+  } catch (e) {
+    status.textContent = 'Camera unavailable — use Upload instead';
+  }
+}
+
+function setupOverlay() {
+  const wrap = $('camera-wrap');
+  overlay.width = wrap.clientWidth;
+  overlay.height = wrap.clientHeight;
+}
+
+function drawCameraGrid() {
+  const ctx = overlay.getContext('2d');
+  const w = overlay.width, h = overlay.height;
+  ctx.clearRect(0, 0, w, h);
+
+  const margin = Math.min(w, h) * 0.05;
+  const size = Math.min(w, h) - margin * 2;
+  const x0 = (w - size) / 2, y0 = (h - size) / 2;
+  const cell = size / 15;
+
+  ctx.strokeStyle = 'rgba(0, 255, 0, 0.35)';
+  ctx.lineWidth = 1;
+  for (let i = 0; i <= 15; i++) {
+    ctx.beginPath(); ctx.moveTo(x0, y0 + i * cell); ctx.lineTo(x0 + size, y0 + i * cell); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x0 + i * cell, y0); ctx.lineTo(x0 + i * cell, y0 + size); ctx.stroke();
+  }
+  ctx.strokeStyle = 'rgba(0, 255, 0, 0.7)';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(x0, y0, size, size);
+}
+
+// ── Capture ──
+
+captureBtn.addEventListener('click', () => {
+  const vw = video.videoWidth, vh = video.videoHeight;
+  captureCanvas.width = vw;
+  captureCanvas.height = vh;
+  captureCanvas.getContext('2d').drawImage(video, 0, 0, vw, vh);
+  captureCanvas.toBlob(blob => {
+    currentBlob = blob;
+    showAlign(URL.createObjectURL(blob));
+  }, 'image/jpeg', 0.92);
+});
+
+uploadBtn.addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', e => {
+  const file = e.target.files[0];
+  if (file) {
+    currentBlob = file;
+    showAlign(URL.createObjectURL(file));
+  }
+  fileInput.value = '';
+});
+
+retakeBtn.addEventListener('click', showCamera);
+newScanBtn.addEventListener('click', showCamera);
+
+// ── Corner detection ──
+
+async function detectCorners() {
+  const form = new FormData();
+  form.append('file', currentBlob, 'capture.jpg');
+
+  try {
+    const res = await fetch('/api/detect-corners', { method: 'POST', body: form });
+    const data = await res.json();
+    imageWidth = data.image_width;
+    imageHeight = data.image_height;
+    corners = data.corners; // [[x,y], ...] TL, TR, BR, BL in image coords
+    drawAlignOverlay();
+    status.textContent = data.detected
+      ? 'Drag corners to adjust, then tap Scan'
+      : 'Could not auto-detect — drag corners manually';
+  } catch (e) {
+    status.textContent = 'Detection failed — drag corners manually';
+    // Default to full image
+    const img = previewImg;
+    imageWidth = img.naturalWidth || 1;
+    imageHeight = img.naturalHeight || 1;
+    corners = [[0, 0], [imageWidth, 0], [imageWidth, imageHeight], [0, imageHeight]];
+    drawAlignOverlay();
+  }
+}
+
+// ── Coordinate helpers ──
+
+function imgToCanvas(ix, iy) {
+  return [ix / imageWidth * overlay.width, iy / imageHeight * overlay.height];
+}
+
+function canvasToImg(cx, cy) {
+  return [cx / overlay.width * imageWidth, cy / overlay.height * imageHeight];
+}
+
+// ── Draw perspective grid from corners ──
+
+function bilinearPoint(u, v) {
+  const [tlx, tly] = corners[0];
+  const [trx, try_] = corners[1];
+  const [brx, bry] = corners[2];
+  const [blx, bly] = corners[3];
+  const x = (1 - v) * ((1 - u) * tlx + u * trx) + v * ((1 - u) * blx + u * brx);
+  const y = (1 - v) * ((1 - u) * tly + u * try_) + v * ((1 - u) * bly + u * bry);
+  return imgToCanvas(x, y);
+}
+
+function drawAlignOverlay() {
+  const ctx = overlay.getContext('2d');
+  ctx.clearRect(0, 0, overlay.width, overlay.height);
+  if (!corners) return;
+
+  // Grid lines via bilinear interpolation
+  ctx.strokeStyle = 'rgba(0, 255, 0, 0.5)';
+  ctx.lineWidth = 1;
+
+  for (let i = 0; i <= 15; i++) {
+    const t = i / 15;
+    // Horizontal line
+    ctx.beginPath();
+    for (let j = 0; j <= 30; j++) {
+      const [x, y] = bilinearPoint(j / 30, t);
+      j === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+    // Vertical line
+    ctx.beginPath();
+    for (let j = 0; j <= 30; j++) {
+      const [x, y] = bilinearPoint(t, j / 30);
+      j === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+  }
+
+  // Corner handles
+  const labels = ['TL', 'TR', 'BR', 'BL'];
+  for (let i = 0; i < 4; i++) {
+    const [cx, cy] = imgToCanvas(corners[i][0], corners[i][1]);
+    const isActive = i === dragging;
+
+    ctx.beginPath();
+    ctx.arc(cx, cy, isActive ? 16 : 12, 0, Math.PI * 2);
+    ctx.fillStyle = isActive ? 'rgba(255, 255, 0, 0.9)' : 'rgba(0, 255, 0, 0.8)';
+    ctx.fill();
+    ctx.strokeStyle = '#000';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    ctx.fillStyle = '#000';
+    ctx.font = 'bold 11px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(labels[i], cx, cy);
+  }
+}
+
+// ── Touch/mouse dragging ──
+
+function getEventPos(e) {
+  const rect = overlay.getBoundingClientRect();
+  if (e.touches) {
+    return [e.touches[0].clientX - rect.left, e.touches[0].clientY - rect.top];
+  }
+  return [e.clientX - rect.left, e.clientY - rect.top];
+}
+
+function findNearestCorner(cx, cy) {
+  if (!corners) return -1;
+  let best = -1, bestDist = GRAB_RADIUS;
+  for (let i = 0; i < 4; i++) {
+    const [sx, sy] = imgToCanvas(corners[i][0], corners[i][1]);
+    const d = Math.hypot(sx - cx, sy - cy);
+    if (d < bestDist) { bestDist = d; best = i; }
+  }
+  return best;
+}
+
+function onPointerDown(e) {
+  if (!corners) return;
+  e.preventDefault();
+  const [cx, cy] = getEventPos(e);
+  dragging = findNearestCorner(cx, cy);
+  if (dragging >= 0) drawAlignOverlay();
+}
+
+function onPointerMove(e) {
+  if (dragging < 0) return;
+  e.preventDefault();
+  const [cx, cy] = getEventPos(e);
+  const [ix, iy] = canvasToImg(cx, cy);
+  corners[dragging] = [
+    Math.max(0, Math.min(imageWidth, ix)),
+    Math.max(0, Math.min(imageHeight, iy))
+  ];
+  drawAlignOverlay();
+}
+
+function onPointerUp(e) {
+  if (dragging < 0) return;
+  dragging = -1;
+  drawAlignOverlay();
+}
+
+overlay.addEventListener('mousedown', onPointerDown);
+overlay.addEventListener('mousemove', onPointerMove);
+overlay.addEventListener('mouseup', onPointerUp);
+overlay.addEventListener('touchstart', onPointerDown, { passive: false });
+overlay.addEventListener('touchmove', onPointerMove, { passive: false });
+overlay.addEventListener('touchend', onPointerUp);
+
+// ── Scan with corners ──
+
+scanBtn.addEventListener('click', async () => {
+  if (!currentBlob || !corners) return;
+  scanBtn.disabled = true;
+  status.textContent = 'Scanning...';
+
+  const form = new FormData();
+  form.append('file', currentBlob, 'capture.jpg');
+  form.append('corners', JSON.stringify(corners));
+
+  try {
+    const res = await fetch('/api/scan', { method: 'POST', body: form });
+    const data = await res.json();
+    if (data.error) {
+      status.textContent = 'Error: ' + data.error;
+    } else {
+      renderBoard(data);
+      status.textContent = 'Done — tap any cell to edit';
+    }
+  } catch (e) {
+    status.textContent = 'Network error';
+  }
+  scanBtn.disabled = false;
+});
+
+// ── Board rendering ──
+
+function renderBoard(data) {
+  boardGrid.innerHTML = '';
+  const uncertainSet = new Set(data.uncertain.map(([r,c]) => `${r},${c}`));
+
+  for (let r = 0; r < 15; r++) {
+    for (let c = 0; c < 15; c++) {
+      const cell = data.board[r][c];
+      const conf = data.confidence[r][c];
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.maxLength = 1;
+      input.value = cell === '.' ? '' : cell;
+
+      if (cell !== '.') {
+        input.classList.add('has-tile');
+        if (uncertainSet.has(`${r},${c}`))
+          input.classList.add('uncertain');
+      }
+
+      input.title = `(${r},${c}) ${(conf * 100).toFixed(0)}%`;
+      input.addEventListener('input', e => {
+        e.target.value = e.target.value.toUpperCase().slice(0, 1);
+      });
+      boardGrid.appendChild(input);
+    }
+  }
+
+  const t = data.timings;
+  statsEl.textContent = `${data.tile_count} tiles | ${data.grid_method} grid | ` +
+    `${t.total_ms.toFixed(0)}ms (grid ${t.grid_ms.toFixed(0)} + detect ${t.tiles_ms.toFixed(0)} + classify ${t.classify_ms.toFixed(0)})`;
+
+  boardSection.classList.add('visible');
+}
+
+// ── Init ──
+
+window.addEventListener('resize', () => {
+  setupOverlay();
+  if (corners) drawAlignOverlay();
+  else if (video.srcObject) drawCameraGrid();
+});
+
+startCamera();
+</script>
+</body>
+</html>
