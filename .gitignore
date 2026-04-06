@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+venv/
+.venv/
+*.lock
+
+# Data (generated, not tracked)
+data/train/
+data/test/
+*.jpeg
+*.jpg
+
+# Models (too large for git)
+models/*.pt
+models/*.onnx
+*.onnx.data
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
