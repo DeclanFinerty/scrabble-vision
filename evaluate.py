@@ -22,10 +22,10 @@ from src.classification.model import (
     load_model, predict_tiles, classify_result
 )
 
-BOARDS_DIR = Path("data/raw_boards")
-CORNERS_DIR = BOARDS_DIR / "corners"
-DEBUG_DIR = BOARDS_DIR / "debug"
-GT_DIR = BOARDS_DIR / "ground_truth"
+EVAL_DIR = Path("data/eval")
+CORNERS_DIR = EVAL_DIR / "corners"
+DEBUG_DIR = EVAL_DIR / "debug"
+GT_DIR = EVAL_DIR / "ground_truth"
 
 
 def load_ground_truth(path: Path) -> list[list[str]] | None:
@@ -179,21 +179,21 @@ def main():
     DEBUG_DIR.mkdir(exist_ok=True)
 
     if args.image:
-        patterns = [BOARDS_DIR / f"{args.image}.jpeg",
-                    BOARDS_DIR / f"{args.image}.jpg",
-                    BOARDS_DIR / f"{args.image}.png"]
+        patterns = [EVAL_DIR / f"{args.image}.jpeg",
+                    EVAL_DIR / f"{args.image}.jpg",
+                    EVAL_DIR / f"{args.image}.png"]
         images = [p for p in patterns if p.exists()]
         if not images:
             print(f"Image not found: {args.image}")
             return
     else:
         images = sorted(
-            p for p in BOARDS_DIR.iterdir()
+            p for p in EVAL_DIR.iterdir()
             if p.suffix.lower() in (".jpeg", ".jpg", ".png")
         )
 
     if not images:
-        print("No images found in", BOARDS_DIR)
+        print("No images found in", EVAL_DIR)
         return
 
     print(f"Loading model: {args.model}")

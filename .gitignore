@@ -6,20 +6,21 @@ venv/
 .venv/
 *.lock
 
-# Data (generated, not tracked)
+# Generated data (not tracked)
 data/train/
 data/test/
-*.jpeg
-*.jpg
+data/real_tiles/
+data/raw_boards/debug/
+data/eval/debug/
 
-# Models (too large for git)
-models/*.pt
-models/*.onnx
-*.onnx.data
+# Debug outputs
+debug_*.jpg
+corners.npy
 
 # IDE
 .vscode/
 .idea/
+.claude/
 
 # OS
 .DS_Store
