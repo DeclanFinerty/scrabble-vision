@@ -245,6 +245,7 @@ async function detectCorners() {
       ? 'Drag corners to adjust, then tap Scan'
       : 'Could not auto-detect — drag corners manually';
   } catch (e) {
+    console.error('Corner detection error:', e);
     status.textContent = 'Detection failed — drag corners manually';
     // Default to full image
     const img = previewImg;
@@ -401,7 +402,8 @@ scanBtn.addEventListener('click', async () => {
       status.textContent = 'Done — tap any cell to edit';
     }
   } catch (e) {
-    status.textContent = 'Network error';
+    console.error('Scan error:', e);
+    status.textContent = 'Error: ' + e.message;
   }
   scanBtn.disabled = false;
 });
@@ -437,7 +439,7 @@ function renderBoard(data) {
 
   const t = data.timings;
   statsEl.textContent = `${data.tile_count} tiles | ${data.grid_method} grid | ` +
-    `${t.total_ms.toFixed(0)}ms (grid ${t.grid_ms.toFixed(0)} + detect ${t.tiles_ms.toFixed(0)} + classify ${t.classify_ms.toFixed(0)})`;
+    `${t.total_ms.toFixed(0)}ms (grid ${t.grid_ms.toFixed(0)} + classify ${t.classify_ms.toFixed(0)})`;
 
   boardSection.classList.add('visible');
 }
