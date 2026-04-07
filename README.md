@@ -6,7 +6,7 @@ CV pipeline with a lightweight CNN (~200K params) — no external API calls. Run
 
 ## How It Works
 
-1. **Grid Detection** — Auto-detect or manually select the 4 board corners, perspective-warp to a square
+1. **Grid Detection** — Auto-detect or interactively select the 4 board corners, perspective-warp to a square
 2. **Cell Classification** — CNN classifies all 225 cells in one pass (A-Z + BONUS + EMPTY, 28 classes)
 3. **Output** — 15×15 letter grid with confidence scores. BONUS and EMPTY map to `.`
 
@@ -14,9 +14,7 @@ CV pipeline with a lightweight CNN (~200K params) — no external API calls. Run
 
 Evaluated on a held-out board image completely separated from all training data:
 
-| Input | Grid Detection |
-|:---:|:---:|
-| ![Eval board](data/eval/eval_board.jpeg) | ![Grid overlay](data/eval/debug/eval_board_grid.jpg) |
+![Eval result](assets/eval_result.jpg)
 
 ```
 Cell accuracy:   223/225 (99.1%)
@@ -30,7 +28,7 @@ Total errors: 2
 ```bash
 uv sync
 
-# Scan a board (interactive corner selection)
+# Scan a board (interactive corner selection with grid overlay)
 uv run scan.py --image path/to/board.jpg --interactive --debug
 
 # Web scanner (open on phone, same WiFi)
@@ -87,7 +85,3 @@ scrabble-vision/
 - [scrabble-solver](https://github.com/kwwangkw/scrabble-solver) — Board scanning with corner keypoint warping
 
 These projects informed the pipeline design. This implementation differs in using synthetic + real tile training data, combined EMPTY/BONUS classification (no separate tile detection stage), and a mobile-first web interface.
-
-## Acknowledgements
-
-Built with the assistance of [Claude](https://claude.ai) (Anthropic).
