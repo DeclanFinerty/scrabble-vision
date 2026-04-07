@@ -14,7 +14,9 @@ CV pipeline with a lightweight CNN (~200K params) — no external API calls. Run
 
 Evaluated on a held-out board image not used in training:
 
-![Eval board](data/eval/eval_board.jpeg)
+| Input | Grid Detection |
+|:---:|:---:|
+| ![Eval board](data/eval/eval_board.jpeg) | ![Grid overlay](data/eval/debug/eval_board_grid.jpg) |
 
 ```
 Cell accuracy: 215/225 (95.6%)
@@ -75,6 +77,10 @@ Training uses two sources combined:
 
 The eval board (`data/eval/`) is completely separated from the training pipeline.
 
-## Acknowledgements
+## References
 
-Built with the assistance of [Claude](https://claude.ai) (Anthropic).
+- [Scrabblers](https://github.com/LordVaTe/Scrabblers) — Scrabble board digitization using CNN classification
+- [scrabble-solver](https://github.com/kwwangkw/scrabble-solver) — Board scanning with corner keypoint warping
+
+These projects informed the pipeline design. This implementation differs in using synthetic + real tile training data, combined EMPTY/BONUS classification (no separate tile detection stage), and a mobile-first web interface.
+

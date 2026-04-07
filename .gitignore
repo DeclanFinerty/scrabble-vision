@@ -11,7 +11,6 @@ data/train/
 data/test/
 data/real_tiles/
 data/raw_boards/debug/
-data/eval/debug/
 
 # Debug outputs
 debug_*.jpg
