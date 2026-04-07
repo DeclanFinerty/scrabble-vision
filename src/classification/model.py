@@ -1,11 +1,12 @@
 """
 Lightweight CNN for classifying Scrabble tile images.
 
-26 classes: A-Z. The tile detector handles empty cells, so the
-classifier only sees tiles that are already known to have a letter.
+28 classes: A-Z + BONUS + EMPTY. The classifier handles all 225 cells
+in a single pass — no separate tile detection step. At inference,
+BONUS and EMPTY both map to '.' on the board.
 
 Architecture is deliberately small (~200K params) targeting <1ms per tile
-on CPU. Full board (225 tiles batched) should be <50ms.
+on CPU. Full board (225 cells batched) should be <50ms.
 """
 
 import torch
@@ -16,9 +17,16 @@ import cv2
 from pathlib import Path
 
 # Class labels — order MUST match ImageFolder's alphabetical folder sort.
-# Only letters: tile detector handles empty cells, classifier only sees tiles.
-CLASSES = sorted(list("ABCDEFGHIJKLMNOPQRSTUVWXYZ"))
-NUM_CLASSES = len(CLASSES)  # 26
+# A-Z + BONUS + EMPTY. Two empty classes for better training, collapsed at inference.
+CLASSES = sorted(list("ABCDEFGHIJKLMNOPQRSTUVWXYZ") + ["BONUS", "EMPTY"])
+NUM_CLASSES = len(CLASSES)  # 28
+
+
+def classify_result(label: str) -> str:
+    """Map classifier output to board character. BONUS/EMPTY → '.'"""
+    if label in ("EMPTY", "BONUS"):
+        return "."
+    return label
 
 # Input size for the classifier
 TILE_INPUT_SIZE = 32  # 32x32 grayscale
@@ -29,7 +37,7 @@ class TileClassifier(nn.Module):
     Small CNN for single-tile classification.
 
     Input:  (batch, 1, 32, 32) grayscale tile image
-    Output: (batch, 26) class logits
+    Output: (batch, 28) class logits
     """
 
     def __init__(self):

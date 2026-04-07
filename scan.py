@@ -2,19 +2,10 @@
 Full pipeline: board photo -> 15x15 letter grid.
 
 Usage:
-    # Auto-detect board corners
     python scan.py --image board.jpg
-
-    # Interactively click 4 corners (recommended for best results)
     python scan.py --image board.jpg --interactive
-
-    # Save debug images to see what the pipeline is doing
     python scan.py --image board.jpg --interactive --debug
-
-    # Reuse previously saved corners
     python scan.py --image board.jpg --corners corners.npy
-
-    # Also extract detected words
     python scan.py --image board.jpg --interactive --debug --words
 """
 
@@ -28,10 +19,9 @@ from src.detection.grid_detect import (
     detect_grid, extract_cell_images, debug_grid,
     save_corners, load_corners, GRID_SIZE
 )
-from src.detection.tile_detect import (
-    detect_tile_presence, debug_tile_detection, calibrate
+from src.classification.model import (
+    load_model, predict_tiles, classify_result
 )
-from src.classification.model import load_model, predict_tiles
 
 
 def scan_board(
@@ -43,33 +33,17 @@ def scan_board(
     corners: np.ndarray = None,
     debug: bool = False,
 ) -> dict:
-    """
-    Full scan pipeline.
-
-    Args:
-        image_path: Path to board photo.
-        model_path: Path to trained classifier weights.
-        confidence_threshold: Flag cells below this as uncertain.
-        device: 'cpu' or 'cuda'.
-        interactive: Open corner selector GUI.
-        corners: Pre-specified corners (4x2 array).
-        debug: Save debug images.
-
-    Returns:
-        Dict with board, confidence, uncertain, timings, etc.
-    """
     timings = {}
 
     image = cv2.imread(image_path)
     if image is None:
         raise FileNotFoundError(f"Could not read image: {image_path}")
 
-    # ── Stage 1: Grid detection ──
+    # ── Grid detection ──
     t0 = time.perf_counter()
     grid = detect_grid(image, corners=corners, interactive=interactive)
     timings["grid_ms"] = (time.perf_counter() - t0) * 1000
 
-    # Save corners for reuse
     if grid.method == "manual" and debug:
         save_corners(grid.corners, "corners.npy")
 
@@ -78,40 +52,24 @@ def scan_board(
 
     cell_images = extract_cell_images(grid)
 
-    # ── Stage 2: Tile presence detection ──
-    t0 = time.perf_counter()
-    profile = calibrate(cell_images)
-    tile_cells = []
-    empty_cells = []
-
-    for row, col, cell_img in cell_images:
-        has_tile, _ = detect_tile_presence(cell_img, row, col, profile)
-        if has_tile:
-            tile_cells.append((row, col, cell_img))
-        else:
-            empty_cells.append((row, col))
-
-    timings["tiles_ms"] = (time.perf_counter() - t0) * 1000
-
-    if debug:
-        debug_tile_detection(cell_images, grid.board_image,
-                              grid.cells, "debug_tiles.jpg", profile)
-
-    # ── Stage 3: Letter classification ──
+    # ── Classification (all 225 cells in one pass) ──
     t0 = time.perf_counter()
 
     board = [["." for _ in range(GRID_SIZE)] for _ in range(GRID_SIZE)]
     confidence = [[0.0 for _ in range(GRID_SIZE)] for _ in range(GRID_SIZE)]
     uncertain = []
+    tile_count = 0
 
-    if tile_cells:
-        model = load_model(model_path, device=device)
-        tile_imgs = [img for _, _, img in tile_cells]
-        predictions = predict_tiles(model, tile_imgs, device=device)
+    model = load_model(model_path, device=device)
+    all_imgs = [img for _, _, img in cell_images]
+    predictions = predict_tiles(model, all_imgs, device=device)
 
-        for (row, col, _), (label, conf) in zip(tile_cells, predictions):
-            board[row][col] = label
-            confidence[row][col] = conf
+    for (row, col, _), (label, conf) in zip(cell_images, predictions):
+        mapped = classify_result(label)
+        board[row][col] = mapped
+        confidence[row][col] = conf
+        if mapped != ".":
+            tile_count += 1
             if conf < confidence_threshold:
                 uncertain.append((row, col))
 
@@ -122,15 +80,14 @@ def scan_board(
         "board": board,
         "confidence": confidence,
         "uncertain": uncertain,
-        "tile_count": len(tile_cells),
-        "empty_count": len(empty_cells),
+        "tile_count": tile_count,
+        "empty_count": GRID_SIZE * GRID_SIZE - tile_count,
         "grid_method": grid.method,
         "timings": timings,
     }
 
 
 def print_board(result: dict):
-    """Pretty-print the scanned board."""
     board = result["board"]
     uncertain_set = set(map(tuple, result["uncertain"]))
 
@@ -140,7 +97,6 @@ def print_board(result: dict):
           f"Empty: {result['empty_count']}")
     print(f"Time: {result['timings']['total_ms']:.0f}ms "
           f"(grid {result['timings']['grid_ms']:.0f} + "
-          f"detect {result['timings']['tiles_ms']:.0f} + "
           f"classify {result['timings']['classify_ms']:.0f})")
     print(f"{'=' * 50}")
 
@@ -165,7 +121,6 @@ def print_board(result: dict):
 
 
 def board_to_words(board: list[list[str]]) -> list[tuple]:
-    """Extract words from the board (across and down)."""
     words = []
 
     for r in range(GRID_SIZE):
@@ -207,14 +162,10 @@ if __name__ == "__main__":
     parser.add_argument("--model", default="models/tile_classifier.pt")
     parser.add_argument("--threshold", type=float, default=0.7)
     parser.add_argument("--device", default="cpu")
-    parser.add_argument("--interactive", action="store_true",
-                        help="Click the 4 board corners manually")
-    parser.add_argument("--corners", default=None,
-                        help="Path to saved corners.npy file")
-    parser.add_argument("--debug", action="store_true",
-                        help="Save debug_grid.jpg and debug_tiles.jpg")
-    parser.add_argument("--words", action="store_true",
-                        help="Extract and print detected words")
+    parser.add_argument("--interactive", action="store_true")
+    parser.add_argument("--corners", default=None)
+    parser.add_argument("--debug", action="store_true")
+    parser.add_argument("--words", action="store_true")
     args = parser.parse_args()
 
     corners = None

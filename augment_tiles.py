@@ -81,6 +81,8 @@ def main():
     parser.add_argument("--input", default="data/real_tiles")
     parser.add_argument("--target-multiplier", type=float, default=1.0,
                         help="Multiply the target count (max class size) by this")
+    parser.add_argument("--min-target", type=int, default=100,
+                        help="Minimum images per class after augmentation")
     args = parser.parse_args()
 
     input_dir = Path(args.input)
@@ -112,9 +114,11 @@ def main():
     if removed:
         print(f"Removed {removed} old augmented images")
 
+    min_target = args.min_target
     max_count = max(len(imgs) for imgs in class_originals.values())
-    target = int(max_count * args.target_multiplier)
-    print(f"Target per class: {target} (max original: {max_count})")
+    target = max(min_target, int(max_count * args.target_multiplier))
+    print(f"Target per class: {target} (max original: {max_count}, "
+          f"min target: {min_target})")
 
     total_generated = 0
 
@@ -126,9 +130,14 @@ def main():
             print(f"  {class_name}: 0 originals, skipping")
             continue
 
-        n_needed = max(0, target - n_orig)
-        augs_per_image = n_needed // n_orig if n_orig > 0 else 0
-        remainder = n_needed % n_orig if n_orig > 0 else 0
+        if n_orig >= target:
+            # Already have enough originals, still add 2 augmentations each
+            n_needed = n_orig * 2
+        else:
+            n_needed = target - n_orig
+
+        augs_per_image = n_needed // n_orig
+        remainder = n_needed % n_orig
 
         generated = 0
         for i, img_path in enumerate(originals):

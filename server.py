@@ -17,8 +17,9 @@ from src.detection.grid_detect import (
     detect_grid, extract_cell_images, auto_detect_corners, order_corners,
     GRID_SIZE
 )
-from src.detection.tile_detect import detect_tile_presence, calibrate
-from src.classification.model import load_model, predict_tiles
+from src.classification.model import (
+    load_model, predict_tiles, classify_result
+)
 
 app = FastAPI()
 
@@ -39,7 +40,6 @@ def _decode_image(contents: bytes) -> np.ndarray | None:
 
 def scan_image(image: np.ndarray, corners: np.ndarray = None,
                confidence_threshold: float = 0.7) -> dict:
-    """Run the full scan pipeline on an in-memory image."""
     timings = {}
 
     t0 = time.perf_counter()
@@ -49,30 +49,21 @@ def scan_image(image: np.ndarray, corners: np.ndarray = None,
     cell_images = extract_cell_images(grid)
 
     t0 = time.perf_counter()
-    profile = calibrate(cell_images)
-    tile_cells = []
-    empty_cells = []
-    for row, col, cell_img in cell_images:
-        has_tile, _ = detect_tile_presence(cell_img, row, col, profile)
-        if has_tile:
-            tile_cells.append((row, col, cell_img))
-        else:
-            empty_cells.append((row, col))
-    timings["tiles_ms"] = (time.perf_counter() - t0) * 1000
-
-    t0 = time.perf_counter()
     board = [["." for _ in range(GRID_SIZE)] for _ in range(GRID_SIZE)]
     confidence = [[0.0 for _ in range(GRID_SIZE)] for _ in range(GRID_SIZE)]
     uncertain = []
+    tile_count = 0
 
-    if tile_cells:
-        model = get_model()
-        tile_imgs = [img for _, _, img in tile_cells]
-        predictions = predict_tiles(model, tile_imgs, device="cpu")
+    model = get_model()
+    all_imgs = [img for _, _, img in cell_images]
+    predictions = predict_tiles(model, all_imgs, device="cpu")
 
-        for (row, col, _), (label, conf) in zip(tile_cells, predictions):
-            board[row][col] = label
-            confidence[row][col] = conf
+    for (row, col, _), (label, conf) in zip(cell_images, predictions):
+        mapped = classify_result(label)
+        board[row][col] = mapped
+        confidence[row][col] = conf
+        if mapped != ".":
+            tile_count += 1
             if conf < confidence_threshold:
                 uncertain.append([row, col])
 
@@ -83,8 +74,8 @@ def scan_image(image: np.ndarray, corners: np.ndarray = None,
         "board": board,
         "confidence": confidence,
         "uncertain": uncertain,
-        "tile_count": len(tile_cells),
-        "empty_count": len(empty_cells),
+        "tile_count": tile_count,
+        "empty_count": GRID_SIZE * GRID_SIZE - tile_count,
         "grid_method": grid.method,
         "timings": timings,
     }
@@ -92,7 +83,6 @@ def scan_image(image: np.ndarray, corners: np.ndarray = None,
 
 @app.post("/api/detect-corners")
 async def detect_corners(file: UploadFile = File(...)):
-    """Auto-detect board corners, return as [[x,y], ...] in image coordinates."""
     image = _decode_image(await file.read())
     if image is None:
         return {"error": "Could not decode image"}
@@ -109,7 +99,6 @@ async def detect_corners(file: UploadFile = File(...)):
             "detected": True,
         }
 
-    # Fallback: full image bounds
     return {
         "corners": [[0, 0], [w, 0], [w, h], [0, h]],
         "image_width": w,

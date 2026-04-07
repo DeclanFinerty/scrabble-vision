@@ -1,9 +1,9 @@
 """
 Train the tile classifier on synthetic + real tile data.
 
-Combines synthetic data (data/train/) and real tile data (data/real_tiles/)
-with configurable oversampling of real images. EMPTY class is excluded —
-the tile detector handles empty cells, the classifier only sees A-Z.
+28 classes: A-Z + BONUS + EMPTY. Combines synthetic data (data/train/)
+and real tile data (data/real_tiles/) with configurable oversampling
+of real images.
 
 Usage:
     uv run train.py
@@ -60,8 +60,6 @@ class CombinedDataset(Dataset):
     def _add_imagefolder(self, dataset, source):
         for path, class_idx in dataset.samples:
             class_name = dataset.classes[class_idx]
-            if class_name == "EMPTY":
-                continue
             if class_name in self.class_to_idx:
                 mapped_idx = self.class_to_idx[class_name]
                 self.samples.append((path, mapped_idx, source))
