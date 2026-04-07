@@ -1,14 +1,11 @@
 """
 Tile presence detector.
 
-Key insight: bonus square positions are IDENTICAL on every standard
-Scrabble board (they're part of the game rules, not the board design).
-We hardcode these positions and focus detection on one question:
-"Is there a wooden tile sitting on this square, or is the square exposed?"
-
-This generalizes across all board styles (black grid, white grid,
-colored boards, etc.) because tiles always look similar — wooden,
-raised, with a dark letter — while board squares vary wildly.
+Instead of asking "does this look like a tile?", we ask "does this
+look like its expected empty state?" Each position has a known empty
+appearance based on the bonus square map. Bonus squares (TW, DW, TL,
+DL) are colored and have higher saturation than wooden tiles. Normal
+squares are detected by checking for the absence of letter content.
 """
 
 import cv2
@@ -57,32 +54,42 @@ def get_square_type(row: int, col: int) -> str:
     return BONUS_SQUARES.get((row, col), "normal")
 
 
+# ── Expected empty hue ranges per square type (OpenCV H: 0-179) ──
+# These are broad ranges — the key signal is saturation, not exact hue.
+EMPTY_HUE_RANGES = {
+    "TW": ((0, 15), (160, 179)),     # red
+    "DW": ((0, 20), (150, 179)),     # pink/rose
+    "TL": ((95, 135),),              # dark blue
+    "DL": ((85, 125),),              # light blue
+}
+
+EMPTY_SAT_MIN = {
+    "TW": 40,
+    "DW": 25,
+    "TL": 35,
+    "DL": 25,
+}
+
+
+def _hue_in_ranges(hue: float, ranges: tuple) -> bool:
+    for lo, hi in ranges:
+        if lo <= hue <= hi:
+            return True
+    return False
+
+
 # ── Tile Detection ───────────────────────────────────────────────
 
 def detect_tile_presence(cell_image: np.ndarray,
                           row: int = -1, col: int = -1) -> tuple[bool, float]:
     """
-    Determine if a cell contains a tile.
+    Determine if a cell contains a tile by checking whether it looks
+    like its expected empty state.
 
-    Focuses on detecting the TILE (wooden, raised, letter imprint)
-    rather than trying to identify board square types, which vary
-    across board designs.
-
-    Signals used:
-    1. Color: tiles are warm beige/tan in a narrow HSV range
-    2. Saturation: tiles have low saturation (wood); colored bonus
-       squares (blue, pink, red) have higher saturation
-    3. Texture: tiles have a uniform wood center with one large
-       dark mark (the letter); empty squares have either nothing
-       or scattered printed text
-    4. Edge contrast: tiles are raised and create border shadows
-
-    Args:
-        cell_image: BGR image of a single cell.
-        row, col: grid position (used for bonus square prior).
-
-    Returns:
-        (has_tile, confidence)
+    Bonus squares: empty = colored (high saturation, matching hue).
+      If saturated + correct hue → empty. Otherwise → tile.
+    Normal squares: empty = plain (no letter content).
+      If significant dark letter-like content → tile. Otherwise → empty.
     """
     if cell_image.size == 0 or cell_image.shape[0] < 4 or cell_image.shape[1] < 4:
         return False, 0.0
@@ -91,94 +98,95 @@ def detect_tile_presence(cell_image: np.ndarray,
     hsv = cv2.cvtColor(cell_image, cv2.COLOR_BGR2HSV)
     gray = cv2.cvtColor(cell_image, cv2.COLOR_BGR2GRAY)
 
-    score = 0.0
+    square_type = get_square_type(row, col) if row >= 0 and col >= 0 else "normal"
 
-    # ── Signal 1: Tile color match ──
-    # Scrabble tiles are warm beige/tan wood.
-    # This is consistent across all board types.
-    tile_mask = cv2.inRange(
-        hsv,
-        np.array([10, 15, 145]),   # H, S, V low
-        np.array([32, 100, 245])   # H, S, V high
-    )
-    tile_fraction = np.count_nonzero(tile_mask) / tile_mask.size
+    if square_type != "normal":
+        return _detect_bonus_square(hsv, square_type)
+    else:
+        return _detect_normal_square(gray, hsv)
 
-    if tile_fraction > 0.55:
-        score += 0.35
-    elif tile_fraction > 0.35:
-        score += 0.20
-    elif tile_fraction > 0.20:
-        score += 0.08
 
-    # ── Signal 2: Low saturation ──
-    # Wood tiles have low saturation. Colored bonus squares
-    # (blue, pink, red) have much higher saturation.
+def _detect_bonus_square(hsv: np.ndarray, square_type: str) -> tuple[bool, float]:
+    """
+    Bonus square detection: if the cell is saturated and matches the
+    expected hue for this square type, it's empty (the colored square
+    is showing). If not, a tile is covering it.
+    """
     mean_sat = float(np.mean(hsv[:, :, 1]))
+    mean_hue = float(np.mean(hsv[:, :, 0]))
 
-    if mean_sat < 30:
-        score += 0.20    # very desaturated = likely tile or plain board
-    elif mean_sat < 50:
-        score += 0.10
-    elif mean_sat > 70:
-        score -= 0.25    # saturated color = bonus square, not a tile
+    hue_ranges = EMPTY_HUE_RANGES.get(square_type)
+    sat_min = EMPTY_SAT_MIN.get(square_type, 30)
 
-    # ── Signal 3: Dark content in center ──
-    # Tiles have a dark letter imprint in the center.
-    # Empty squares either have nothing (plain) or small scattered text.
-    margin = max(3, min(h, w) // 4)
+    if hue_ranges is None:
+        return False, 0.5
+
+    hue_match = _hue_in_ranges(mean_hue, hue_ranges)
+    sat_match = mean_sat >= sat_min
+
+    if hue_match and sat_match:
+        # Matches expected empty color → no tile
+        confidence = min(1.0, 0.5 + (mean_sat - sat_min) / 100)
+        return False, confidence
+    elif sat_match and not hue_match:
+        # Saturated but wrong hue — probably still empty (board color variation)
+        # or could be a tile. Low confidence either way.
+        return False, 0.4
+    else:
+        # Low saturation = wooden tile covering the colored square
+        confidence = min(1.0, 0.5 + (sat_min - mean_sat) / 80)
+        return True, confidence
+
+
+def _detect_normal_square(gray: np.ndarray, hsv: np.ndarray) -> tuple[bool, float]:
+    """
+    Normal square detection: empty normal squares are plain and uniform.
+    Tiles on normal squares have dark letter content. Also check
+    saturation — a saturated cell at a "normal" position might be a
+    mis-aligned bonus square, so lean toward empty.
+    """
+    h, w = gray.shape[:2]
+
+    # Check saturation first — if unexpectedly saturated, probably
+    # grid line or color bleed from adjacent bonus square, not a tile
+    mean_sat = float(np.mean(hsv[:, :, 1]))
+    if mean_sat > 70:
+        return False, 0.6
+
+    # Look for dark letter content in the center
+    margin = max(3, min(h, w) // 5)
     center = gray[margin:-margin, margin:-margin]
+    if center.size == 0:
+        return False, 0.3
 
-    if center.size > 0:
-        center_mean = float(np.mean(center))
-        center_min = float(np.min(center))
+    center_mean = float(np.mean(center))
+    center_std = float(np.std(center))
 
-        # Tiles have a bright center (wood) with dark marks (letter)
-        # The minimum pixel value in the center indicates dark letter strokes
-        dark_contrast = center_mean - center_min
+    # Adaptive threshold to find dark marks
+    block_size = max(11, (min(h, w) // 3)) | 1
+    thresh = cv2.adaptiveThreshold(
+        gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY_INV, block_size, 10
+    )
 
-        if dark_contrast > 60 and center_mean > 140:
-            # Bright background with dark marks = likely tile with letter
-            score += 0.25
-        elif dark_contrast > 30 and center_mean > 130:
-            score += 0.10
-        elif center_mean < 100:
-            # Very dark cell = probably a dark-colored bonus square
-            score -= 0.10
+    # Only look at the center region for letter content
+    center_thresh = thresh[margin:-margin, margin:-margin]
+    dark_ratio = np.count_nonzero(center_thresh) / center_thresh.size
 
-    # ── Signal 4: Border contrast ──
-    # Tiles are raised above the board and create edge shadows.
-    # Compute brightness difference between border and center.
-    border_width = max(2, min(h, w) // 6)
-
-    top_strip = gray[:border_width, :]
-    bottom_strip = gray[-border_width:, :]
-    left_strip = gray[:, :border_width]
-    right_strip = gray[:, -border_width:]
-
-    border_mean = np.mean(np.concatenate([
-        top_strip.flatten(), bottom_strip.flatten(),
-        left_strip.flatten(), right_strip.flatten()
-    ]))
-
-    if center.size > 0:
-        border_center_diff = abs(float(np.mean(center)) - border_mean)
-        if border_center_diff > 15:
-            score += 0.10  # visible border = raised tile
-        elif border_center_diff > 8:
-            score += 0.05
-
-    # ── Bonus square prior ──
-    # If we know this is a bonus square position and the score is
-    # borderline, lean toward "empty" since bonus squares are more
-    # often empty than covered (most games use ~60-80 of 225 squares).
-    if row >= 0 and col >= 0 and is_bonus_square(row, col):
-        if 0.30 < score < 0.55:
-            score -= 0.08  # nudge borderline bonus squares toward empty
-
-    has_tile = score >= 0.45
-    confidence = max(0.0, min(1.0, score))
-
-    return has_tile, confidence
+    # Tiles have a letter: moderate dark content (5-40%) with some contrast
+    # Empty squares: very little dark content (<3%) and low std dev
+    if dark_ratio > 0.06 and center_std > 20:
+        confidence = min(1.0, 0.5 + dark_ratio * 2)
+        return True, confidence
+    elif dark_ratio < 0.03 and center_std < 15:
+        return False, 0.8
+    elif dark_ratio < 0.03:
+        return False, 0.6
+    else:
+        # Borderline — small amount of dark content could be noise or faint text
+        has_tile = dark_ratio > 0.05
+        confidence = 0.45
+        return has_tile, confidence
 
 
 def detect_tiles_batch(cell_images: list[tuple]) -> list[tuple]:

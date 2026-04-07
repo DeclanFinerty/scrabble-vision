@@ -1,7 +1,8 @@
 """
 Lightweight CNN for classifying Scrabble tile images.
 
-28 classes: A-Z (0-25), BLANK (26), EMPTY (27)
+26 classes: A-Z. The tile detector handles empty cells, so the
+classifier only sees tiles that are already known to have a letter.
 
 Architecture is deliberately small (~200K params) targeting <1ms per tile
 on CPU. Full board (225 tiles batched) should be <50ms.
@@ -15,9 +16,9 @@ import cv2
 from pathlib import Path
 
 # Class labels — order MUST match ImageFolder's alphabetical folder sort.
-# ImageFolder sorts: A, B, BLANK, C, D, E, EMPTY, F, G, ... Z
-CLASSES = sorted(list("ABCDEFGHIJKLMNOPQRSTUVWXYZ") + ["BLANK", "EMPTY"])
-NUM_CLASSES = len(CLASSES)  # 28
+# Only letters: tile detector handles empty cells, classifier only sees tiles.
+CLASSES = sorted(list("ABCDEFGHIJKLMNOPQRSTUVWXYZ"))
+NUM_CLASSES = len(CLASSES)  # 26
 
 # Input size for the classifier
 TILE_INPUT_SIZE = 32  # 32x32 grayscale
@@ -28,7 +29,7 @@ class TileClassifier(nn.Module):
     Small CNN for single-tile classification.
 
     Input:  (batch, 1, 32, 32) grayscale tile image
-    Output: (batch, 28) class logits
+    Output: (batch, 26) class logits
     """
 
     def __init__(self):

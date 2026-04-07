@@ -109,18 +109,10 @@ def scan_board(
         predictions = predict_tiles(model, tile_imgs, device=device)
 
         for (row, col, _), (label, conf) in zip(tile_cells, predictions):
-            if label == "EMPTY":
-                board[row][col] = "?"
-                confidence[row][col] = conf
+            board[row][col] = label
+            confidence[row][col] = conf
+            if conf < confidence_threshold:
                 uncertain.append((row, col))
-            elif label == "BLANK":
-                board[row][col] = "_"
-                confidence[row][col] = conf
-            else:
-                board[row][col] = label
-                confidence[row][col] = conf
-                if conf < confidence_threshold:
-                    uncertain.append((row, col))
 
     timings["classify_ms"] = (time.perf_counter() - t0) * 1000
     timings["total_ms"] = sum(timings.values())

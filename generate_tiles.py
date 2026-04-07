@@ -31,16 +31,6 @@ POINT_VALUES = {
 TILE_BG_LOW = (160, 185, 200)
 TILE_BG_HIGH = (195, 220, 235)
 
-# Board square colors for EMPTY cells (various bonus square colors)
-BOARD_COLORS = [
-    (140, 180, 160),    # standard green-ish
-    (120, 140, 180),    # double letter (blue-ish)
-    (100, 100, 170),    # triple letter (darker blue)
-    (160, 130, 150),    # double word (pink-ish)
-    (80, 80, 140),      # triple word (red-ish)
-    (170, 190, 170),    # light board
-]
-
 
 def random_tile_bg() -> np.ndarray:
     """Random beige tile background color."""
@@ -52,14 +42,6 @@ def random_tile_bg() -> np.ndarray:
 def render_tile(letter: str, size: int = 64) -> np.ndarray:
     """Render a single clean tile image."""
     img = np.full((size, size, 3), random_tile_bg(), dtype=np.uint8)
-
-    if letter == "EMPTY":
-        color = random.choice(BOARD_COLORS)
-        img[:] = color
-        return img
-
-    if letter == "BLANK":
-        return img
 
     # Draw the letter centered
     font = cv2.FONT_HERSHEY_SIMPLEX

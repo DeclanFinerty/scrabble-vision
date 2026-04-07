@@ -76,12 +76,7 @@ def scan_board_image(image: np.ndarray, corners: np.ndarray = None,
         tile_imgs = [img for _, _, img in tile_cells]
         predictions = predict_tiles(model, tile_imgs, device="cpu")
         for (row, col, _), (label, conf) in zip(tile_cells, predictions):
-            if label == "EMPTY":
-                board[row][col] = "?"
-            elif label == "BLANK":
-                board[row][col] = "_"
-            else:
-                board[row][col] = label
+            board[row][col] = label
             confidence[row][col] = conf
     timings["classify_ms"] = (time.perf_counter() - t0) * 1000
 
@@ -104,6 +99,9 @@ def compare_boards(predicted: list[list[str]], truth: list[list[str]]) -> dict:
     tile_detected = 0
     tile_missed = 0
     empty_as_tile = 0
+    letters_correct = 0
+    letters_total = 0
+    true_positives = 0
     confusion = defaultdict(int)
 
     for r in range(GRID_SIZE):
@@ -113,21 +111,27 @@ def compare_boards(predicted: list[list[str]], truth: list[list[str]]) -> dict:
             is_true_tile = true not in (".", "_")
             is_pred_tile = pred not in (".", "?")
 
-            if true == ".":
-                tile_expected += 0
-                if is_pred_tile:
-                    empty_as_tile += 1
-            else:
+            if is_true_tile:
                 tile_expected += 1
-
             if is_pred_tile:
                 tile_detected += 1
 
-            if true == "." and pred == ".":
-                correct += 1
-            elif true == "_" and pred == "_":
-                correct += 1
-            elif true == pred:
+            # Tile detection: TP, FP, FN
+            if is_true_tile and is_pred_tile:
+                true_positives += 1
+            elif not is_true_tile and is_pred_tile:
+                empty_as_tile += 1
+            elif is_true_tile and not is_pred_tile:
+                tile_missed += 1
+
+            # Letter accuracy: among cells where both sides agree a tile exists
+            if is_true_tile and is_pred_tile:
+                letters_total += 1
+                if true == pred:
+                    letters_correct += 1
+
+            # Overall cell accuracy
+            if true == pred:
                 correct += 1
             elif true == "." and pred in (".", "?"):
                 correct += 1
@@ -136,8 +140,10 @@ def compare_boards(predicted: list[list[str]], truth: list[list[str]]) -> dict:
                 if is_true_tile and is_pred_tile:
                     confusion[(true, pred)] += 1
                 elif is_true_tile and not is_pred_tile:
-                    tile_missed += 1
                     confusion[(true, "MISSED")] += 1
+
+    precision = true_positives / tile_detected if tile_detected > 0 else 0.0
+    recall = true_positives / tile_expected if tile_expected > 0 else 0.0
 
     return {
         "correct": correct,
@@ -145,8 +151,13 @@ def compare_boards(predicted: list[list[str]], truth: list[list[str]]) -> dict:
         "wrong": wrong,
         "tile_expected": tile_expected,
         "tile_detected": tile_detected,
+        "true_positives": true_positives,
         "tile_missed": tile_missed,
         "empty_as_tile": empty_as_tile,
+        "precision": precision,
+        "recall": recall,
+        "letters_correct": letters_correct,
+        "letters_total": letters_total,
         "confusion": dict(confusion),
     }
 
@@ -155,18 +166,32 @@ def print_comparison(result: dict, predicted: list[list[str]],
                      truth: list[list[str]], confidence: list[list[float]]):
     """Print detailed comparison between predicted and ground truth."""
     acc = result["correct"] / result["total"]
-    print(f"  Accuracy: {result['correct']}/{result['total']} ({acc:.1%})")
-    print(f"  Tiles: {result['tile_detected']} detected / {result['tile_expected']} expected")
-    if result["tile_missed"]:
-        print(f"  Missed tiles: {result['tile_missed']}")
+    print(f"  Cell accuracy: {result['correct']}/{result['total']} ({acc:.1%})")
+
+    # Tile detection precision/recall
+    p, r = result["precision"], result["recall"]
+    print(f"  Tile detection: {result['tile_detected']} detected / "
+          f"{result['tile_expected']} expected")
+    print(f"    Precision: {result['true_positives']}/{result['tile_detected']} "
+          f"({p:.1%})  — of detected, how many are real tiles")
+    print(f"    Recall:    {result['true_positives']}/{result['tile_expected']} "
+          f"({r:.1%})  — of real tiles, how many were found")
     if result["empty_as_tile"]:
-        print(f"  False positives (empty→tile): {result['empty_as_tile']}")
+        print(f"    False pos:  {result['empty_as_tile']} empty squares marked as tiles")
+    if result["tile_missed"]:
+        print(f"    Missed:     {result['tile_missed']} real tiles missed")
+
+    # Letter accuracy (among correctly detected tiles)
+    lc, lt = result["letters_correct"], result["letters_total"]
+    if lt > 0:
+        print(f"  Letter accuracy: {lc}/{lt} ({lc / lt:.1%})"
+              f"  — of tiles found, how many letters are correct")
 
     if result["wrong"]:
         print(f"\n  Wrong cells ({len(result['wrong'])}):")
-        for r, c, true, pred in result["wrong"]:
-            conf = confidence[r][c]
-            print(f"    ({r:2d},{c:2d}): expected '{true}' got '{pred}' ({conf:.0%})")
+        for row, col, true, pred in result["wrong"]:
+            conf = confidence[row][col]
+            print(f"    ({row:2d},{col:2d}): expected '{true}' got '{pred}' ({conf:.0%})")
 
 
 def print_side_by_side(predicted: list[list[str]], truth: list[list[str]]):
@@ -264,17 +289,23 @@ def main():
                              str(DEBUG_DIR / f"{stem}_tiles.jpg"))
 
         t = result["timings"]
+        total_ms = t["grid_ms"] + t["tiles_ms"] + t["classify_ms"]
+        per_tile = (t["classify_ms"] / result["tile_count"]
+                    if result["tile_count"] > 0 else 0)
         print(f"  Tiles: {result['tile_count']} detected, "
               f"{result['empty_count']} empty")
-        print(f"  Time: grid {t['grid_ms']:.0f}ms + "
-              f"detect {t['tiles_ms']:.0f}ms + "
-              f"classify {t['classify_ms']:.0f}ms")
+        print(f"  Time: {total_ms:.0f}ms total "
+              f"(grid {t['grid_ms']:.0f} + detect {t['tiles_ms']:.0f} + "
+              f"classify {t['classify_ms']:.0f}ms, "
+              f"{per_tile:.1f}ms/tile)")
 
         # Compare against ground truth
         gt_path = GT_DIR / f"{stem}.txt"
         truth = load_ground_truth(gt_path)
         if truth is not None:
             comparison = compare_boards(result["board"], truth)
+            comparison["timings"] = result["timings"]
+            comparison["tile_count"] = result["tile_count"]
             print_comparison(comparison, result["board"], truth,
                              result["confidence"])
             print_side_by_side(result["board"], truth)
@@ -286,42 +317,73 @@ def main():
             for r in range(GRID_SIZE):
                 print(f"  {r:2d} " + "  ".join(result["board"][r]))
 
-    # Summary across all boards
-    if len(all_results) > 1:
-        print(f"\n{'=' * 60}")
-        print("SUMMARY")
-        print(f"{'=' * 60}")
+    # Summary
+    if not all_results:
+        return
 
-        total_correct = sum(r["correct"] for _, r in all_results)
-        total_cells = sum(r["total"] for _, r in all_results)
-        total_wrong = sum(len(r["wrong"]) for _, r in all_results)
+    print(f"\n{'=' * 60}")
+    print("SUMMARY")
+    print(f"{'=' * 60}")
 
-        print(f"Boards evaluated: {len(all_results)}")
-        print(f"Overall accuracy: {total_correct}/{total_cells} "
-              f"({total_correct / total_cells:.1%})")
-        print(f"Total errors: {total_wrong}")
+    total_correct = sum(r["correct"] for _, r in all_results)
+    total_cells = sum(r["total"] for _, r in all_results)
+    total_wrong = sum(len(r["wrong"]) for _, r in all_results)
+    total_tiles = sum(r.get("tile_count", 0) for _, r in all_results)
 
-        # Aggregate confusion pairs
-        all_confusion = defaultdict(int)
-        for _, r in all_results:
-            for pair, count in r["confusion"].items():
-                all_confusion[pair] += count
+    print(f"Boards evaluated: {len(all_results)}")
+    print(f"Cell accuracy: {total_correct}/{total_cells} "
+          f"({total_correct / total_cells:.1%})")
+    print(f"Total errors: {total_wrong}")
 
-        if all_confusion:
-            sorted_conf = sorted(all_confusion.items(),
-                                 key=lambda x: x[1], reverse=True)
-            print(f"\nMost confused pairs:")
-            for (true, pred), count in sorted_conf[:15]:
-                print(f"  {true} → {pred}: {count}")
+    # Aggregate tile detection precision/recall
+    sum_tp = sum(r["true_positives"] for _, r in all_results)
+    sum_detected = sum(r["tile_detected"] for _, r in all_results)
+    sum_expected = sum(r["tile_expected"] for _, r in all_results)
+    sum_fp = sum(r["empty_as_tile"] for _, r in all_results)
+    sum_missed = sum(r["tile_missed"] for _, r in all_results)
 
-    elif len(all_results) == 1:
-        stem, r = all_results[0]
-        if r["confusion"]:
-            sorted_conf = sorted(r["confusion"].items(),
-                                 key=lambda x: x[1], reverse=True)
-            print(f"\nMost confused pairs:")
-            for (true, pred), count in sorted_conf[:15]:
-                print(f"  {true} → {pred}: {count}")
+    agg_p = sum_tp / sum_detected if sum_detected > 0 else 0.0
+    agg_r = sum_tp / sum_expected if sum_expected > 0 else 0.0
+    print(f"\nTile detection:")
+    print(f"  Precision: {sum_tp}/{sum_detected} ({agg_p:.1%})"
+          f"  | False pos: {sum_fp}")
+    print(f"  Recall:    {sum_tp}/{sum_expected} ({agg_r:.1%})"
+          f"  | Missed: {sum_missed}")
+
+    # Aggregate letter accuracy
+    sum_lc = sum(r["letters_correct"] for _, r in all_results)
+    sum_lt = sum(r["letters_total"] for _, r in all_results)
+    if sum_lt > 0:
+        print(f"\nLetter accuracy: {sum_lc}/{sum_lt} ({sum_lc / sum_lt:.1%})")
+
+    # Timing summary
+    grid_ms = sum(r["timings"]["grid_ms"] for _, r in all_results)
+    detect_ms = sum(r["timings"]["tiles_ms"] for _, r in all_results)
+    classify_ms = sum(r["timings"]["classify_ms"] for _, r in all_results)
+    total_ms = grid_ms + detect_ms + classify_ms
+    n = len(all_results)
+
+    print(f"\nTiming ({n} boards, {total_tiles} tiles):")
+    print(f"  Total:    {total_ms:7.0f}ms  ({total_ms / n:5.0f}ms/board)")
+    print(f"  Grid:     {grid_ms:7.0f}ms  ({grid_ms / n:5.0f}ms/board)")
+    print(f"  Detect:   {detect_ms:7.0f}ms  ({detect_ms / n:5.0f}ms/board)")
+    print(f"  Classify: {classify_ms:7.0f}ms  ({classify_ms / n:5.0f}ms/board)")
+    if total_tiles > 0:
+        print(f"  Per tile: {classify_ms / total_tiles:.1f}ms classify, "
+              f"{detect_ms / total_tiles:.1f}ms detect")
+
+    # Aggregate confusion pairs
+    all_confusion = defaultdict(int)
+    for _, r in all_results:
+        for pair, count in r["confusion"].items():
+            all_confusion[pair] += count
+
+    if all_confusion:
+        sorted_conf = sorted(all_confusion.items(),
+                             key=lambda x: x[1], reverse=True)
+        print(f"\nMost confused pairs:")
+        for (true, pred), count in sorted_conf[:15]:
+            print(f"  {true} → {pred}: {count}")
 
 
 if __name__ == "__main__":
