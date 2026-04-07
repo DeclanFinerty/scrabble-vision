@@ -80,6 +80,7 @@ Open `http://<your-local-ip>:8000` on your phone (same WiFi). Camera feed with g
 ## Future
 
 - Real tile photo fine-tuning (supplement synthetic data with photographed tiles)
+    - this was done, but we could reduce synthetic and increase real data augmentation to 100 each class.  Accuracy is very high now though
 - ONNX + Rust inference for mobile-native performance
 - Integration as a module in the broader Scrabble learning app
 

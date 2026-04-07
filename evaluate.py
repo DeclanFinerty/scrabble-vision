@@ -21,7 +21,7 @@ from src.detection.grid_detect import (
     detect_grid, extract_cell_images, debug_grid,
     save_corners, load_corners, GRID_SIZE
 )
-from src.detection.tile_detect import detect_tile_presence, debug_tile_detection
+from src.detection.tile_detect import detect_tile_presence, debug_tile_detection, calibrate
 from src.classification.model import load_model, predict_tiles
 
 BOARDS_DIR = Path("data/raw_boards")
@@ -58,10 +58,11 @@ def scan_board_image(image: np.ndarray, corners: np.ndarray = None,
     cell_images = extract_cell_images(grid)
 
     t0 = time.perf_counter()
+    profile = calibrate(cell_images)
     tile_cells = []
     empty_cells = []
     for row, col, cell_img in cell_images:
-        has_tile, _ = detect_tile_presence(cell_img, row, col)
+        has_tile, _ = detect_tile_presence(cell_img, row, col, profile)
         if has_tile:
             tile_cells.append((row, col, cell_img))
         else:
@@ -88,6 +89,7 @@ def scan_board_image(image: np.ndarray, corners: np.ndarray = None,
         "tile_count": len(tile_cells),
         "empty_count": len(empty_cells),
         "timings": timings,
+        "profile": profile,
     }
 
 
@@ -286,7 +288,8 @@ def main():
                    str(DEBUG_DIR / f"{stem}_grid.jpg"))
         debug_tile_detection(result["cell_images"], result["grid"].board_image,
                              result["grid"].cells,
-                             str(DEBUG_DIR / f"{stem}_tiles.jpg"))
+                             str(DEBUG_DIR / f"{stem}_tiles.jpg"),
+                             result["profile"])
 
         t = result["timings"]
         total_ms = t["grid_ms"] + t["tiles_ms"] + t["classify_ms"]

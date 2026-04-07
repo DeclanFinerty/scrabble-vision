@@ -17,7 +17,7 @@ from src.detection.grid_detect import (
     detect_grid, extract_cell_images, auto_detect_corners, order_corners,
     GRID_SIZE
 )
-from src.detection.tile_detect import detect_tile_presence
+from src.detection.tile_detect import detect_tile_presence, calibrate
 from src.classification.model import load_model, predict_tiles
 
 app = FastAPI()
@@ -49,10 +49,11 @@ def scan_image(image: np.ndarray, corners: np.ndarray = None,
     cell_images = extract_cell_images(grid)
 
     t0 = time.perf_counter()
+    profile = calibrate(cell_images)
     tile_cells = []
     empty_cells = []
     for row, col, cell_img in cell_images:
-        has_tile, _ = detect_tile_presence(cell_img, row, col)
+        has_tile, _ = detect_tile_presence(cell_img, row, col, profile)
         if has_tile:
             tile_cells.append((row, col, cell_img))
         else:

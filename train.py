@@ -78,6 +78,25 @@ class CombinedDataset(Dataset):
         return img, class_idx, source
 
 
+class SubsetWithTransform(Dataset):
+    """Subset of a CombinedDataset with its own transform."""
+
+    def __init__(self, dataset, indices, transform):
+        self.dataset = dataset
+        self.indices = indices
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getitem__(self, idx):
+        path, class_idx, source = self.dataset.samples[self.indices[idx]]
+        from PIL import Image
+        img = Image.open(path).convert("RGB")
+        img = self.transform(img)
+        return img, class_idx, source
+
+
 def split_real_by_board(samples, val_fraction=0.2):
     """Split real samples so each board is represented in val."""
     by_board = defaultdict(list)
@@ -146,22 +165,6 @@ def train_model(args):
     # Create data loaders with transforms
     train_transform = get_transforms(train=True)
     val_transform = get_transforms(train=False)
-
-    class SubsetWithTransform(Dataset):
-        def __init__(self, dataset, indices, transform):
-            self.dataset = dataset
-            self.indices = indices
-            self.transform = transform
-
-        def __len__(self):
-            return len(self.indices)
-
-        def __getitem__(self, idx):
-            path, class_idx, source = self.dataset.samples[self.indices[idx]]
-            from PIL import Image
-            img = Image.open(path).convert("RGB")
-            img = self.transform(img)
-            return img, class_idx, source
 
     train_set = SubsetWithTransform(combined, train_indices, train_transform)
     val_set = SubsetWithTransform(combined, val_indices, val_transform)

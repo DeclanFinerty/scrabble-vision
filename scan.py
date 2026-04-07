@@ -29,7 +29,7 @@ from src.detection.grid_detect import (
     save_corners, load_corners, GRID_SIZE
 )
 from src.detection.tile_detect import (
-    detect_tile_presence, debug_tile_detection
+    detect_tile_presence, debug_tile_detection, calibrate
 )
 from src.classification.model import load_model, predict_tiles
 
@@ -80,11 +80,12 @@ def scan_board(
 
     # ── Stage 2: Tile presence detection ──
     t0 = time.perf_counter()
+    profile = calibrate(cell_images)
     tile_cells = []
     empty_cells = []
 
     for row, col, cell_img in cell_images:
-        has_tile, _ = detect_tile_presence(cell_img, row, col)
+        has_tile, _ = detect_tile_presence(cell_img, row, col, profile)
         if has_tile:
             tile_cells.append((row, col, cell_img))
         else:
@@ -94,7 +95,7 @@ def scan_board(
 
     if debug:
         debug_tile_detection(cell_images, grid.board_image,
-                              grid.cells, "debug_tiles.jpg")
+                              grid.cells, "debug_tiles.jpg", profile)
 
     # ── Stage 3: Letter classification ──
     t0 = time.perf_counter()
