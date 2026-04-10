@@ -15,6 +15,10 @@ data/raw_boards/debug/
 # Debug outputs
 debug_*.jpg
 corners.npy
+data/raw_boards/debug_corners/
+
+# User data
+saved_boards/
 
 # IDE
 .vscode/

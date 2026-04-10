@@ -55,15 +55,37 @@
   .board-grid input {
     width: 100%; aspect-ratio: 1; text-align: center;
     font-size: min(3.5vw, 18px); font-weight: 700;
-    border: none; padding: 0; background: #2a2a2a; color: #fff;
+    border: 2px solid transparent; padding: 0; background: #2a2a2a; color: #fff;
+    caret-color: transparent;
   }
   .board-grid input.has-tile { background: #3a3520; color: #f5deb3; }
-  .board-grid input.uncertain { background: #4a3520; color: #ffaa44; }
-  .board-grid input:focus { outline: 2px solid #4CAF50; z-index: 1; }
+  .board-grid input.conf-low { background: #4a3520; color: #ffaa44; }
+  .board-grid input.conf-vlow { background: #4a2020; color: #ff8888; }
+  .board-grid input.blank { font-style: italic; text-transform: lowercase; font-weight: 400; }
+  .board-grid input:focus { border-color: #4CAF50; z-index: 1; outline: none; }
+  .board-grid input.selected { border-color: #4CAF50; z-index: 1; }
 
   .stats { text-align: center; padding: 12px; font-size: 13px; color: #888; }
   #file-input { display: none; }
   .readiness-score { text-align: center; font-size: 12px; color: #666; padding: 2px; }
+
+  .saved-boards { max-width: 600px; margin: 0 auto; padding: 8px; display: none; }
+  .saved-boards.visible { display: block; }
+  .saved-boards h3 { text-align: center; padding: 10px; font-size: 16px; }
+  .saved-list { display: flex; flex-direction: column; gap: 8px; }
+  .saved-item {
+    display: flex; align-items: center; gap: 10px; padding: 10px;
+    background: #2a2a2a; border-radius: 8px; cursor: pointer;
+  }
+  .saved-item img { width: 60px; height: 60px; object-fit: cover; border-radius: 4px; }
+  .saved-item .info { flex: 1; }
+  .saved-item .info .name { font-weight: 600; font-size: 14px; }
+  .saved-item .info .date { font-size: 12px; color: #888; }
+  .saved-item .del-btn {
+    background: none; border: none; color: #c0392b; font-size: 18px;
+    cursor: pointer; padding: 8px;
+  }
+  button.small { padding: 8px 14px; font-size: 13px; }
   .hidden { display: none !important; }
 </style>
 </head>
@@ -94,7 +116,24 @@
   <div class="board-grid" id="board-grid"></div>
   <div class="stats" id="stats"></div>
   <div class="controls">
+    <button id="review-btn" class="blue small">Review Low Confidence</button>
+  </div>
+  <div class="controls">
+    <button id="save-btn">Save Board</button>
+    <button id="copy-btn" class="blue small">Copy Board</button>
+    <button id="download-btn" class="secondary small">Download JSON</button>
+  </div>
+  <div class="controls">
     <button id="new-scan-btn" class="secondary">New Scan</button>
+    <button id="view-saved-btn" class="secondary small">Saved Boards</button>
+  </div>
+</div>
+
+<div class="saved-boards" id="saved-boards">
+  <h3>Saved Boards</h3>
+  <div class="saved-list" id="saved-list"></div>
+  <div class="controls">
+    <button id="back-from-saved" class="secondary">Back</button>
   </div>
 </div>
 
@@ -148,6 +187,7 @@ function showCamera() {
   cameraControls.classList.remove('hidden');
   alignControls.classList.add('hidden');
   boardSection.classList.remove('visible');
+  $('saved-boards').classList.remove('visible');
   overlay.getContext('2d').clearRect(0, 0, overlay.width, overlay.height);
   overlay.style.pointerEvents = 'none';
   corners = null;
@@ -429,40 +469,281 @@ scanBtn.addEventListener('click', async () => {
   scanBtn.disabled = false;
 });
 
+// ── Board state ──
+
+let boardData = null;   // current board array 15x15
+let confData = null;    // confidence array 15x15
+let blankSet = new Set(); // set of "r,c" keys for blank tiles
+let selectedCell = -1;  // flat index of selected cell
+
+const reviewBtn = $('review-btn');
+const saveBtn = $('save-btn');
+const copyBtn = $('copy-btn');
+const downloadBtn = $('download-btn');
+const viewSavedBtn = $('view-saved-btn');
+const savedBoardsEl = $('saved-boards');
+const savedListEl = $('saved-list');
+const backFromSaved = $('back-from-saved');
+
+function cellAt(r, c) { return boardGrid.children[r * 15 + c]; }
+
+function selectCell(idx) {
+  if (selectedCell >= 0 && boardGrid.children[selectedCell])
+    boardGrid.children[selectedCell].classList.remove('selected');
+  selectedCell = idx;
+  if (idx >= 0 && boardGrid.children[idx]) {
+    boardGrid.children[idx].classList.add('selected');
+    boardGrid.children[idx].focus();
+  }
+}
+
+function updateCellStyle(input, r, c) {
+  input.classList.remove('has-tile', 'conf-low', 'conf-vlow', 'blank');
+  const val = boardData[r][c];
+  if (val !== '.') {
+    input.classList.add('has-tile');
+    const conf = confData[r][c];
+    if (conf < 0.4) input.classList.add('conf-vlow');
+    else if (conf < 0.7) input.classList.add('conf-low');
+  }
+  if (blankSet.has(`${r},${c}`)) input.classList.add('blank');
+  input.value = val === '.' ? '' : (blankSet.has(`${r},${c}`) ? val.toLowerCase() : val);
+}
+
 // ── Board rendering ──
 
 function renderBoard(data) {
   boardGrid.innerHTML = '';
-  const uncertainSet = new Set(data.uncertain.map(([r,c]) => `${r},${c}`));
+  boardData = data.board.map(row => [...row]);
+  confData = data.confidence.map(row => [...row]);
+  blankSet = new Set();
+  selectedCell = -1;
 
   for (let r = 0; r < 15; r++) {
     for (let c = 0; c < 15; c++) {
-      const cell = data.board[r][c];
-      const conf = data.confidence[r][c];
       const input = document.createElement('input');
       input.type = 'text';
       input.maxLength = 1;
-      input.value = cell === '.' ? '' : cell;
+      input.readOnly = true;
+      input.dataset.r = r;
+      input.dataset.c = c;
+      input.title = `(${r},${c}) ${(confData[r][c] * 100).toFixed(0)}%`;
+      updateCellStyle(input, r, c);
 
-      if (cell !== '.') {
-        input.classList.add('has-tile');
-        if (uncertainSet.has(`${r},${c}`))
-          input.classList.add('uncertain');
-      }
-
-      input.title = `(${r},${c}) ${(conf * 100).toFixed(0)}%`;
-      input.addEventListener('input', e => {
-        e.target.value = e.target.value.toUpperCase().slice(0, 1);
+      input.addEventListener('click', () => selectCell(r * 15 + c));
+      let lastTap = 0;
+      input.addEventListener('touchend', e => {
+        const now = Date.now();
+        if (now - lastTap < 350) {
+          e.preventDefault();
+          toggleBlank(r, c);
+        }
+        lastTap = now;
+      });
+      input.addEventListener('dblclick', e => {
+        e.preventDefault();
+        toggleBlank(r, c);
       });
       boardGrid.appendChild(input);
     }
   }
 
-  const t = data.timings;
-  statsEl.textContent = `${data.tile_count} tiles | ${data.grid_method} grid | ` +
-    `${t.total_ms.toFixed(0)}ms (grid ${t.grid_ms.toFixed(0)} + classify ${t.classify_ms.toFixed(0)})`;
+  if (data.timings) {
+    const t = data.timings;
+    statsEl.textContent = `${data.tile_count} tiles | ${data.grid_method} grid | ` +
+      `${t.total_ms.toFixed(0)}ms (grid ${t.grid_ms.toFixed(0)} + classify ${t.classify_ms.toFixed(0)})`;
+  }
 
   boardSection.classList.add('visible');
+  savedBoardsEl.classList.remove('visible');
+}
+
+// ── Keyboard navigation ──
+
+document.addEventListener('keydown', e => {
+  if (selectedCell < 0 || !boardSection.classList.contains('visible')) return;
+  const r = Math.floor(selectedCell / 15);
+  const c = selectedCell % 15;
+
+  if (e.key === 'ArrowUp' && r > 0) { e.preventDefault(); selectCell((r - 1) * 15 + c); }
+  else if (e.key === 'ArrowDown' && r < 14) { e.preventDefault(); selectCell((r + 1) * 15 + c); }
+  else if (e.key === 'ArrowLeft' && c > 0) { e.preventDefault(); selectCell(r * 15 + c - 1); }
+  else if (e.key === 'ArrowRight' && c < 14) { e.preventDefault(); selectCell(r * 15 + c + 1); }
+  else if (e.key === 'Backspace' || e.key === 'Delete') {
+    e.preventDefault();
+    boardData[r][c] = '.';
+    confData[r][c] = 1.0;
+    blankSet.delete(`${r},${c}`);
+    updateCellStyle(boardGrid.children[selectedCell], r, c);
+  } else if (/^[a-zA-Z]$/.test(e.key)) {
+    e.preventDefault();
+    boardData[r][c] = e.key.toUpperCase();
+    if (confData[r][c] < 1.0) confData[r][c] = 1.0;
+    updateCellStyle(boardGrid.children[selectedCell], r, c);
+    if (c < 14) selectCell(r * 15 + c + 1);
+  }
+});
+
+// ── Blank toggle ──
+
+function toggleBlank(r, c) {
+  const key = `${r},${c}`;
+  if (boardData[r][c] === '.') return;
+  if (blankSet.has(key)) blankSet.delete(key);
+  else blankSet.add(key);
+  updateCellStyle(cellAt(r, c), r, c);
+}
+
+// ── Review low confidence ──
+
+let reviewIdx = -1;
+reviewBtn.addEventListener('click', () => {
+  if (!boardData) return;
+  const lowCells = [];
+  for (let r = 0; r < 15; r++)
+    for (let c = 0; c < 15; c++)
+      if (boardData[r][c] !== '.' && confData[r][c] < 0.7)
+        lowCells.push(r * 15 + c);
+
+  if (lowCells.length === 0) {
+    status.textContent = 'No low-confidence cells to review';
+    return;
+  }
+  reviewIdx = (reviewIdx + 1) % lowCells.length;
+  selectCell(lowCells[reviewIdx]);
+  status.textContent = `Review ${reviewIdx + 1}/${lowCells.length} — type to correct`;
+});
+
+// ── Export ──
+
+function getBoardText() {
+  if (!boardData) return '';
+  return boardData.map((row, r) =>
+    row.map((cell, c) => {
+      if (cell === '.') return '.';
+      return blankSet.has(`${r},${c}`) ? cell.toLowerCase() : cell;
+    }).join('')
+  ).join('\n');
+}
+
+function getBoardJSON() {
+  return JSON.stringify({
+    board: boardData,
+    blanks: Array.from(blankSet).map(k => k.split(',').map(Number)),
+    confidence: confData,
+    timestamp: new Date().toISOString(),
+  }, null, 2);
+}
+
+copyBtn.addEventListener('click', async () => {
+  try {
+    await navigator.clipboard.writeText(getBoardText());
+    status.textContent = 'Board copied to clipboard';
+  } catch { status.textContent = 'Copy failed — check permissions'; }
+});
+
+downloadBtn.addEventListener('click', () => {
+  const blob = new Blob([getBoardJSON()], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'board.json';
+  a.click();
+});
+
+// ── Save / Load boards ──
+
+saveBtn.addEventListener('click', async () => {
+  if (!boardData || !currentBlob) return;
+  saveBtn.disabled = true;
+  status.textContent = 'Saving...';
+
+  const form = new FormData();
+  form.append('file', currentBlob, 'capture.jpg');
+  form.append('board', JSON.stringify(boardData));
+  form.append('blanks', JSON.stringify(Array.from(blankSet).map(k => k.split(',').map(Number))));
+  form.append('confidence', JSON.stringify(confData));
+
+  try {
+    const res = await fetch('/api/boards/save', { method: 'POST', body: form });
+    const data = await res.json();
+    status.textContent = `Saved as "${data.name}"`;
+  } catch (e) {
+    status.textContent = 'Save failed: ' + e.message;
+  }
+  saveBtn.disabled = false;
+});
+
+viewSavedBtn.addEventListener('click', loadSavedBoards);
+backFromSaved.addEventListener('click', () => {
+  savedBoardsEl.classList.remove('visible');
+  if (boardData) boardSection.classList.add('visible');
+});
+
+async function loadSavedBoards() {
+  boardSection.classList.remove('visible');
+  savedBoardsEl.classList.add('visible');
+  savedListEl.innerHTML = '<div class="status">Loading...</div>';
+
+  try {
+    const res = await fetch('/api/boards');
+    const data = await res.json();
+    savedListEl.innerHTML = '';
+
+    if (data.boards.length === 0) {
+      savedListEl.innerHTML = '<div class="status">No saved boards yet</div>';
+      return;
+    }
+
+    for (const b of data.boards) {
+      const item = document.createElement('div');
+      item.className = 'saved-item';
+      const d = new Date(b.timestamp);
+      item.innerHTML = `
+        <img src="/api/boards/${b.id}/image" alt="Board">
+        <div class="info">
+          <div class="name">${b.name}</div>
+          <div class="date">${d.toLocaleDateString()} ${d.toLocaleTimeString()}</div>
+        </div>
+        <button class="del-btn" data-id="${b.id}">&times;</button>
+      `;
+      item.querySelector('.info').addEventListener('click', () => openSavedBoard(b.id));
+      item.querySelector('.del-btn').addEventListener('click', async e => {
+        e.stopPropagation();
+        if (!confirm('Delete this board?')) return;
+        await fetch(`/api/boards/${b.id}`, { method: 'DELETE' });
+        loadSavedBoards();
+      });
+      savedListEl.appendChild(item);
+    }
+  } catch (e) {
+    savedListEl.innerHTML = `<div class="status">Error: ${e.message}</div>`;
+  }
+}
+
+async function openSavedBoard(id) {
+  try {
+    const res = await fetch(`/api/boards/${id}`);
+    const data = await res.json();
+    // Load the image as currentBlob for re-saving
+    const imgRes = await fetch(`/api/boards/${id}/image`);
+    currentBlob = await imgRes.blob();
+
+    renderBoard({
+      board: data.board,
+      confidence: data.confidence || data.board.map(r => r.map(() => 1.0)),
+      uncertain: [],
+      tile_count: data.board.flat().filter(c => c !== '.').length,
+      timings: null,
+    });
+    // Restore blanks
+    if (data.blanks) {
+      blankSet = new Set(data.blanks.map(([r, c]) => `${r},${c}`));
+      for (const [r, c] of data.blanks) updateCellStyle(cellAt(r, c), r, c);
+    }
+    status.textContent = `Loaded "${data.name}" — edit and re-save`;
+  } catch (e) {
+    status.textContent = 'Load failed: ' + e.message;
+  }
 }
 
 // ── Init ──

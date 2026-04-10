@@ -8,9 +8,13 @@ Open http://<your-ip>:8000 on your phone.
 import cv2
 import numpy as np
 import time
+import uuid
+import os
+import shutil
+from datetime import datetime, timezone
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 import json
 
 from src.detection.grid_detect import (
@@ -22,6 +26,9 @@ from src.classification.model import (
 )
 
 app = FastAPI()
+
+SAVED_BOARDS_DIR = os.environ.get("SAVED_BOARDS_DIR", "./saved_boards")
+os.makedirs(SAVED_BOARDS_DIR, exist_ok=True)
 
 _model = None
 
@@ -129,6 +136,81 @@ async def scan(file: UploadFile = File(...), corners: str = Form(None)):
 
     result = scan_image(image, corners=corner_arr)
     return result
+
+
+@app.post("/api/boards/save")
+async def save_board(
+    file: UploadFile = File(...),
+    board: str = Form(...),
+    blanks: str = Form("[]"),
+    confidence: str = Form("[]"),
+    name: str = Form(""),
+):
+    board_id = str(uuid.uuid4())[:8]
+    board_dir = os.path.join(SAVED_BOARDS_DIR, board_id)
+    os.makedirs(board_dir, exist_ok=True)
+
+    img_bytes = await file.read()
+    with open(os.path.join(board_dir, "image.jpg"), "wb") as f:
+        f.write(img_bytes)
+
+    meta = {
+        "id": board_id,
+        "board": json.loads(board),
+        "blanks": json.loads(blanks),
+        "confidence": json.loads(confidence),
+        "name": name or f"Board {board_id}",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    with open(os.path.join(board_dir, "board.json"), "w") as f:
+        json.dump(meta, f)
+
+    return {"id": board_id, "name": meta["name"], "timestamp": meta["timestamp"]}
+
+
+@app.get("/api/boards")
+async def list_boards():
+    boards = []
+    if not os.path.isdir(SAVED_BOARDS_DIR):
+        return {"boards": []}
+    for name in os.listdir(SAVED_BOARDS_DIR):
+        meta_path = os.path.join(SAVED_BOARDS_DIR, name, "board.json")
+        if os.path.isfile(meta_path):
+            with open(meta_path) as f:
+                meta = json.load(f)
+            boards.append({
+                "id": meta["id"],
+                "name": meta.get("name", name),
+                "timestamp": meta.get("timestamp", ""),
+            })
+    boards.sort(key=lambda b: b["timestamp"], reverse=True)
+    return {"boards": boards}
+
+
+@app.get("/api/boards/{board_id}")
+async def get_board(board_id: str):
+    meta_path = os.path.join(SAVED_BOARDS_DIR, board_id, "board.json")
+    if not os.path.isfile(meta_path):
+        return JSONResponse({"error": "Not found"}, status_code=404)
+    with open(meta_path) as f:
+        return json.load(f)
+
+
+@app.get("/api/boards/{board_id}/image")
+async def get_board_image(board_id: str):
+    img_path = os.path.join(SAVED_BOARDS_DIR, board_id, "image.jpg")
+    if not os.path.isfile(img_path):
+        return JSONResponse({"error": "Not found"}, status_code=404)
+    return FileResponse(img_path, media_type="image/jpeg")
+
+
+@app.delete("/api/boards/{board_id}")
+async def delete_board(board_id: str):
+    board_dir = os.path.join(SAVED_BOARDS_DIR, board_id)
+    if not os.path.isdir(board_dir):
+        return JSONResponse({"error": "Not found"}, status_code=404)
+    shutil.rmtree(board_dir)
+    return {"deleted": board_id}
 
 
 @app.get("/")
