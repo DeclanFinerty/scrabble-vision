@@ -340,11 +340,11 @@ async function detectCorners() {
     corners = data.corners; // [[x,y], ...] TL, TR, BR, BL in image coords
     drawAlignOverlay();
     status.textContent = data.detected
-      ? 'Drag corners to adjust, then tap Scan'
-      : 'Could not auto-detect — drag corners manually';
+      ? 'Align grid to board lines, then tap Scan'
+      : 'Auto-detect failed — drag grid corners to align';
   } catch (e) {
     console.error('Corner detection error:', e);
-    status.textContent = 'Detection failed — drag corners manually';
+    status.textContent = 'Detection failed — drag grid corners to align';
     // Default to full image
     const img = previewImg;
     imageWidth = img.naturalWidth || 1;
@@ -381,20 +381,17 @@ function drawAlignOverlay() {
   ctx.clearRect(0, 0, overlay.width, overlay.height);
   if (!corners) return;
 
-  // Grid lines via bilinear interpolation
-  ctx.strokeStyle = 'rgba(0, 255, 0, 0.5)';
+  // Inner grid lines (cell boundaries)
+  ctx.strokeStyle = 'rgba(0, 255, 0, 0.4)';
   ctx.lineWidth = 1;
-
-  for (let i = 0; i <= 15; i++) {
+  for (let i = 1; i < 15; i++) {
     const t = i / 15;
-    // Horizontal line
     ctx.beginPath();
     for (let j = 0; j <= 30; j++) {
       const [x, y] = bilinearPoint(j / 30, t);
       j === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
     }
     ctx.stroke();
-    // Vertical line
     ctx.beginPath();
     for (let j = 0; j <= 30; j++) {
       const [x, y] = bilinearPoint(t, j / 30);
@@ -403,25 +400,36 @@ function drawAlignOverlay() {
     ctx.stroke();
   }
 
-  // Corner handles
-  const labels = ['TL', 'TR', 'BR', 'BL'];
+  // Outer border lines (thicker, brighter — the key alignment reference)
+  ctx.strokeStyle = 'rgba(0, 255, 0, 0.9)';
+  ctx.lineWidth = 2;
+  for (const t of [0, 1]) {
+    ctx.beginPath();
+    for (let j = 0; j <= 30; j++) {
+      const [x, y] = bilinearPoint(j / 30, t);
+      j === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+    ctx.beginPath();
+    for (let j = 0; j <= 30; j++) {
+      const [x, y] = bilinearPoint(t, j / 30);
+      j === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+  }
+
+  // Corner handles (draggable grid corners)
   for (let i = 0; i < 4; i++) {
     const [cx, cy] = imgToCanvas(corners[i][0], corners[i][1]);
     const isActive = i === dragging;
 
     ctx.beginPath();
-    ctx.arc(cx, cy, isActive ? 16 : 12, 0, Math.PI * 2);
+    ctx.arc(cx, cy, isActive ? 18 : 14, 0, Math.PI * 2);
     ctx.fillStyle = isActive ? 'rgba(255, 255, 0, 0.9)' : 'rgba(0, 255, 0, 0.8)';
     ctx.fill();
     ctx.strokeStyle = '#000';
     ctx.lineWidth = 2;
     ctx.stroke();
-
-    ctx.fillStyle = '#000';
-    ctx.font = 'bold 11px sans-serif';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(labels[i], cx, cy);
   }
 }
 
@@ -534,8 +542,11 @@ function selectCell(idx) {
     boardGrid.children[selectedCell].classList.remove('selected');
   selectedCell = idx;
   if (idx >= 0 && boardGrid.children[idx]) {
-    boardGrid.children[idx].classList.add('selected');
-    boardGrid.children[idx].focus();
+    const el = boardGrid.children[idx];
+    el.classList.add('selected');
+    el.focus({ preventScroll: true });
+    // Scroll so cell is visible but action bar stays reachable
+    el.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
     actionBar.classList.add('visible');
   } else {
     actionBar.classList.remove('visible');
