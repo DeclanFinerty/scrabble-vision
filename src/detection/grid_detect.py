@@ -176,132 +176,273 @@ def _detect_by_contours(image: np.ndarray) -> np.ndarray | None:
     return None
 
 
-def _detect_by_flood(image: np.ndarray) -> np.ndarray | None:
-    """Find board by flood-filling from image borders to isolate the board."""
-    small, scale = _downscale(image, 500)
+def _seg_angle(seg):
+    """Angle of a HoughLinesP segment in radians, normalized to (-pi/2, pi/2]."""
+    x1, y1, x2, y2 = seg
+    angle = np.arctan2(y2 - y1, x2 - x1)
+    # Normalize so that lines in opposite directions map to same angle
+    if angle > np.pi / 2:
+        angle -= np.pi
+    elif angle <= -np.pi / 2:
+        angle += np.pi
+    return angle
+
+
+def _seg_perp_dist(seg, axis_angle):
+    """Perpendicular distance from origin along axis normal."""
+    x1, y1, x2, y2 = seg
+    mx, my = (x1 + x2) / 2, (y1 + y2) / 2
+    normal = axis_angle + np.pi / 2
+    return mx * np.cos(normal) + my * np.sin(normal)
+
+
+def _cluster_by_distance(values, gap):
+    """Cluster sorted scalar values by proximity gap.
+
+    Returns list of clusters, each a list of original indices.
+    """
+    if len(values) == 0:
+        return []
+    order = np.argsort(values)
+    sorted_vals = values[order]
+    clusters = [[order[0]]]
+    for i in range(1, len(sorted_vals)):
+        if sorted_vals[i] - sorted_vals[i - 1] > gap:
+            clusters.append([])
+        clusters[-1].append(order[i])
+    return clusters
+
+
+def _grid_inlier_score(positions, pitch, offset):
+    """Count how many positions align to a grid defined by pitch + offset."""
+    if pitch <= 0:
+        return 0
+    residuals = np.mod(positions - offset, pitch)
+    # Distance to nearest grid line
+    dist_to_grid = np.minimum(residuals, pitch - residuals)
+    tol = pitch * 0.15
+    return int(np.sum(dist_to_grid < tol))
+
+
+def _find_cell_pitch(positions, min_dim):
+    """Find dominant cell pitch from line positions.
+
+    Tests candidate pitches and picks the one that aligns the most
+    observed positions to a regular grid. Candidates come from the
+    expected range for a 15-cell board.
+    """
+    positions = np.sort(positions)
+    if len(positions) < 3:
+        return None
+
+    span = positions[-1] - positions[0]
+    if span < 1:
+        return None
+
+    # Expected pitch: board is 15 cells, spanning 60-100% of image dimension
+    lo = min_dim / 22
+    hi = min_dim / 10
+    candidates = np.arange(lo, hi, 0.5)
+
+    best_pitch = None
+    best_score = 0
+
+    for p in candidates:
+        # Try several offsets for this pitch
+        for pos in positions[:min(8, len(positions))]:
+            offset = np.mod(pos, p)
+            score = _grid_inlier_score(positions, p, offset)
+            if score > best_score:
+                best_score = score
+                best_pitch = p
+
+    if best_pitch is None or best_score < 4:
+        return None
+
+    # Refine: median of gaps that are close to the best pitch
+    all_gaps = []
+    for i in range(len(positions)):
+        for j in range(i + 1, len(positions)):
+            d = abs(positions[j] - positions[i])
+            n = round(d / best_pitch)
+            if n >= 1 and abs(d / n - best_pitch) < best_pitch * 0.15:
+                all_gaps.append(d / n)
+
+    return float(np.median(all_gaps)) if all_gaps else float(best_pitch)
+
+
+def _fit_grid_lines(positions, pitch, n_lines=16, bounds=None):
+    """Fit n_lines evenly-spaced lines to observed positions.
+
+    Always produces exactly n_lines spanning (n_lines-1)*pitch.
+    Finds the phase offset that aligns best with observations,
+    then centers the grid. If bounds=(lo, hi) is given, constrains
+    the grid to stay within that range (with half-cell margin).
+    """
+    if pitch <= 0:
+        return None
+
+    # Find best offset by testing each observed position as anchor
+    best_offset = 0
+    best_score = 0
+    for pos in positions:
+        offset = np.mod(pos, pitch)
+        score = _grid_inlier_score(positions, pitch, offset)
+        if score > best_score:
+            best_score = score
+            best_offset = offset
+
+    # Center the grid on the observed positions
+    obs_center = (positions.min() + positions.max()) / 2
+    center_idx = round((obs_center - best_offset) / pitch)
+    first_line = best_offset + (center_idx - (n_lines - 1) / 2) * pitch
+
+    fitted = np.array([first_line + i * pitch for i in range(n_lines)])
+
+    # Constrain to bounds if provided (no margin — grid must be inside image)
+    if bounds is not None:
+        lo, hi = bounds
+        if fitted[-1] > hi:
+            fitted -= (fitted[-1] - hi)
+        if fitted[0] < lo:
+            fitted += (lo - fitted[0])
+
+    return fitted
+
+
+def _detect_by_grid_lines(image: np.ndarray) -> np.ndarray | None:
+    """Detect board corners by finding the internal 15x15 grid lines.
+
+    Uses HoughLinesP to find long line segments, clusters them into
+    horizontal and vertical families, determines cell pitch from spacing,
+    fits a regular 16-line grid in each direction, and returns the
+    outermost intersections as corners.
+    """
+    small, scale = _downscale(image, 800)
     gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
-    blurred = cv2.GaussianBlur(gray, (15, 15), 0)
     sh, sw = small.shape[:2]
+    min_dim = min(sh, sw)
 
-    _, binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    # Try multiple Canny threshold ranges
+    median_val = float(np.median(gray))
+    canny_params = [
+        (int(max(0, 0.66 * median_val)), int(min(255, 1.33 * median_val))),
+        (30, 100),   # low — catches subtle grid lines
+        (50, 150),   # medium
+    ]
 
-    # Ensure borders are background (white) for flood fill
-    # Try both polarities: board lighter or darker than background
-    for invert in [False, True]:
-        mask = cv2.bitwise_not(binary) if invert else binary.copy()
+    for canny_lo, canny_hi in canny_params:
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+        edges = cv2.Canny(blurred, canny_lo, canny_hi)
 
-        # Flood fill from all border pixels
-        fill_mask = np.zeros((sh + 2, sw + 2), dtype=np.uint8)
-        border_pts = (
-            [(0, y) for y in range(sh)] +
-            [(sw - 1, y) for y in range(sh)] +
-            [(x, 0) for x in range(sw)] +
-            [(x, sh - 1) for x in range(sw)]
-        )
-        for x, y in border_pts:
-            if mask[y, x] == 255:
-                cv2.floodFill(mask, fill_mask, (x, y), 0)
-
-        # Whatever remains is the board interior
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL,
-                                       cv2.CHAIN_APPROX_SIMPLE)
-        if not contours:
+        min_len = int(0.15 * min_dim)
+        lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=40,
+                                minLineLength=min_len, maxLineGap=20)
+        if lines is None:
             continue
 
-        contours = sorted(contours, key=cv2.contourArea, reverse=True)
-        result = _find_quad_in_contours(contours, scale, image.shape)
+        segments = lines.reshape(-1, 4)
+        if len(segments) < 8:
+            continue
+
+        result = _fit_grid_from_segments(segments, sh, sw, scale, image.shape)
         if result is not None:
             return result
 
     return None
 
 
-def _line_intersection(line1, line2):
-    """Compute intersection of two lines given as (rho, theta) pairs."""
-    rho1, theta1 = line1
-    rho2, theta2 = line2
-    a1, b1 = np.cos(theta1), np.sin(theta1)
-    a2, b2 = np.cos(theta2), np.sin(theta2)
-    det = a1 * b2 - a2 * b1
-    if abs(det) < 1e-8:
-        return None
-    x = (b2 * rho1 - b1 * rho2) / det
-    y = (a1 * rho2 - a2 * rho1) / det
-    return np.array([x, y], dtype=np.float32)
+def _fit_grid_from_segments(segments, sh, sw, scale, image_shape):
+    """Given HoughLinesP segments, try to fit a 15x15 grid and return corners."""
+    min_dim = min(sh, sw)
+    angles = np.array([_seg_angle(s) for s in segments])
 
+    h_mask = np.abs(angles) < np.radians(15)
+    v_mask = np.abs(angles - np.pi / 2) < np.radians(15)
+    # Also catch negative-side vertical (angles near -90° mapped to +90° by normalize)
+    # _seg_angle already normalizes to (-pi/2, pi/2] so vertical = near pi/2
 
-def _cluster_lines(lines: list, gap: float = 20.0) -> list:
-    """Cluster lines by rho proximity, return cluster representatives (median)."""
-    if not lines:
-        return []
-    lines_sorted = sorted(lines, key=lambda l: l[0])
-    clusters = [[lines_sorted[0]]]
-    for line in lines_sorted[1:]:
-        if abs(line[0] - clusters[-1][-1][0]) < gap:
-            clusters[-1].append(line)
-        else:
-            clusters.append([line])
-    return [min(c, key=lambda l: abs(l[0] - np.median([x[0] for x in c])))
-            for c in clusters]
+    h_segs = segments[h_mask]
+    v_segs = segments[v_mask]
 
-
-def _detect_by_hough(image: np.ndarray) -> np.ndarray | None:
-    """Find board corners via Hough lines on downscaled image."""
-    small, scale = _downscale(image, 500)
-    gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
-    blurred = cv2.GaussianBlur(gray, (15, 15), 0)
-    edges = cv2.Canny(blurred, 30, 100)
-
-    lines = cv2.HoughLines(edges, 1, np.pi / 180, threshold=80)
-    if lines is None or len(lines) < 4:
+    if len(h_segs) < 3 or len(v_segs) < 3:
         return None
 
-    horizontal = []
-    vertical = []
-    for line in lines:
-        rho, theta = line[0]
-        if abs(theta - np.pi / 2) < np.pi / 6:
-            horizontal.append((rho, theta))
-        elif abs(theta) < np.pi / 6 or abs(theta - np.pi) < np.pi / 6:
-            vertical.append((rho, theta))
+    h_angle = float(np.median(angles[h_mask]))
+    v_angle = float(np.median(angles[v_mask]))
 
-    h_clusters = _cluster_lines(horizontal, gap=15)
-    v_clusters = _cluster_lines(vertical, gap=15)
+    h_dists = np.array([_seg_perp_dist(s, h_angle) for s in h_segs])
+    v_dists = np.array([_seg_perp_dist(s, v_angle) for s in v_segs])
 
-    if len(h_clusters) < 2 or len(v_clusters) < 2:
+    cluster_gap = min_dim * 0.02
+    h_clusters = _cluster_by_distance(h_dists, cluster_gap)
+    v_clusters = _cluster_by_distance(v_dists, cluster_gap)
+
+    if len(h_clusters) < 3 or len(v_clusters) < 3:
         return None
 
-    top = h_clusters[0]
-    bottom = h_clusters[-1]
-    left = v_clusters[0]
-    right = v_clusters[-1]
+    h_positions = np.array([np.median(h_dists[c]) for c in h_clusters])
+    v_positions = np.array([np.median(v_dists[c]) for c in v_clusters])
 
-    tl = _line_intersection(top, left)
-    tr = _line_intersection(top, right)
-    br = _line_intersection(bottom, right)
-    bl = _line_intersection(bottom, left)
+    h_pitch = _find_cell_pitch(h_positions, min_dim)
+    v_pitch = _find_cell_pitch(v_positions, min_dim)
+    if h_pitch is None or v_pitch is None:
+        return None
+
+    # Sanity: h and v pitch should be similar (square cells)
+    if max(h_pitch, v_pitch) / min(h_pitch, v_pitch) > 1.4:
+        return None
+
+    pitch = (h_pitch + v_pitch) / 2
+
+    # Compute perp-distance bounds from image corners
+    img_corners = np.array([[0, 0], [sw, 0], [sw, sh], [0, sh]], dtype=np.float32)
+    h_corner_dists = [_seg_perp_dist([c[0], c[1], c[0], c[1]], h_angle) for c in img_corners]
+    v_corner_dists = [_seg_perp_dist([c[0], c[1], c[0], c[1]], v_angle) for c in img_corners]
+    h_bounds = (min(h_corner_dists), max(h_corner_dists))
+    v_bounds = (min(v_corner_dists), max(v_corner_dists))
+
+    h_fitted = _fit_grid_lines(h_positions, pitch, n_lines=16, bounds=h_bounds)
+    v_fitted = _fit_grid_lines(v_positions, pitch, n_lines=16, bounds=v_bounds)
+    if h_fitted is None or v_fitted is None:
+        return None
+
+    h_normal = h_angle + np.pi / 2
+    v_normal = v_angle + np.pi / 2
+
+    def intersect_hv(d_h, d_v):
+        hx, hy = d_h * np.cos(h_normal), d_h * np.sin(h_normal)
+        vx, vy = d_v * np.cos(v_normal), d_v * np.sin(v_normal)
+        hd = np.array([np.cos(h_angle), np.sin(h_angle)])
+        vd = np.array([np.cos(v_angle), np.sin(v_angle)])
+        det = hd[0] * (-vd[1]) - (-vd[0]) * hd[1]
+        if abs(det) < 1e-6:
+            return None
+        t = ((-vd[1]) * (vx - hx) - (-vd[0]) * (vy - hy)) / det
+        return np.array([hx + t * hd[0], hy + t * hd[1]], dtype=np.float32)
+
+    tl = intersect_hv(h_fitted[0], v_fitted[0])
+    tr = intersect_hv(h_fitted[0], v_fitted[-1])
+    br = intersect_hv(h_fitted[-1], v_fitted[-1])
+    bl = intersect_hv(h_fitted[-1], v_fitted[0])
 
     if any(p is None for p in [tl, tr, br, bl]):
         return None
 
     corners = np.array([tl, tr, br, bl], dtype=np.float32) / scale
-    if _validate_corners(corners, image.shape):
+    if _validate_corners(corners, image_shape, max_area_frac=0.98):
         return corners
 
     return None
 
 
 def auto_detect_corners(image: np.ndarray) -> np.ndarray | None:
-    """Try multiple strategies to find the board's 4 corners."""
+    """Try grid-line detection first, fall back to contour method."""
+    corners = _detect_by_grid_lines(image)
+    if corners is not None:
+        return corners
+
     corners = _detect_by_contours(image)
-    if corners is not None:
-        return corners
-
-    corners = _detect_by_flood(image)
-    if corners is not None:
-        return corners
-
-    corners = _detect_by_hough(image)
     if corners is not None:
         return corners
 
