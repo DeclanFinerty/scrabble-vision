@@ -364,16 +364,75 @@ function canvasToImg(cx, cy) {
   return [cx / overlay.width * imageWidth, cy / overlay.height * imageHeight];
 }
 
-// ── Draw perspective grid from corners ──
+// ── Homography-based perspective grid ──
 
-function bilinearPoint(u, v) {
-  const [tlx, tly] = corners[0];
-  const [trx, try_] = corners[1];
-  const [brx, bry] = corners[2];
-  const [blx, bly] = corners[3];
-  const x = (1 - v) * ((1 - u) * tlx + u * trx) + v * ((1 - u) * blx + u * brx);
-  const y = (1 - v) * ((1 - u) * tly + u * try_) + v * ((1 - u) * bly + u * bry);
-  return imgToCanvas(x, y);
+function computeHomography(src, dst) {
+  // Compute 3x3 homography mapping 4 src points to 4 dst points.
+  // src/dst: [[x0,y0],[x1,y1],[x2,y2],[x3,y3]]
+  // Solves Ah=0 via 8x9 system reduced to 8x8 by fixing h[8]=1.
+  const A = [];
+  for (let i = 0; i < 4; i++) {
+    const [xs, ys] = src[i];
+    const [xd, yd] = dst[i];
+    A.push([xs, ys, 1, 0, 0, 0, -xd*xs, -xd*ys, -xd]);
+    A.push([0, 0, 0, xs, ys, 1, -yd*xs, -yd*ys, -yd]);
+  }
+  // Solve 8x8 system (set h8=1, move last column to RHS)
+  const M = [], b = [];
+  for (let i = 0; i < 8; i++) {
+    M.push(A[i].slice(0, 8));
+    b.push(-A[i][8]);
+  }
+  // Gaussian elimination with partial pivoting
+  for (let col = 0; col < 8; col++) {
+    let maxRow = col, maxVal = Math.abs(M[col][col]);
+    for (let row = col + 1; row < 8; row++) {
+      if (Math.abs(M[row][col]) > maxVal) { maxVal = Math.abs(M[row][col]); maxRow = row; }
+    }
+    [M[col], M[maxRow]] = [M[maxRow], M[col]];
+    [b[col], b[maxRow]] = [b[maxRow], b[col]];
+    const pivot = M[col][col];
+    if (Math.abs(pivot) < 1e-12) return null;
+    for (let j = col; j < 8; j++) M[col][j] /= pivot;
+    b[col] /= pivot;
+    for (let row = 0; row < 8; row++) {
+      if (row === col) continue;
+      const f = M[row][col];
+      for (let j = col; j < 8; j++) M[row][j] -= f * M[col][j];
+      b[row] -= f * b[col];
+    }
+  }
+  return [b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], 1];
+}
+
+function applyHomography(H, x, y) {
+  const w = H[6]*x + H[7]*y + H[8];
+  return [(H[0]*x + H[1]*y + H[2]) / w, (H[3]*x + H[4]*y + H[5]) / w];
+}
+
+let _homography = null;
+
+function getHomography() {
+  // Maps grid coords (0..15, 0..15) to image coords
+  // TL=(0,0), TR=(15,0), BR=(15,15), BL=(0,15) → corners[0..3]
+  const src = [[0,0], [15,0], [15,15], [0,15]];
+  const dst = corners;
+  return computeHomography(src, dst);
+}
+
+function gridToCanvas(gx, gy) {
+  if (!_homography) return [0, 0];
+  const [ix, iy] = applyHomography(_homography, gx, gy);
+  return imgToCanvas(ix, iy);
+}
+
+function drawGridLine(ctx, points) {
+  ctx.beginPath();
+  for (let i = 0; i < points.length; i++) {
+    const [x, y] = points[i];
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  }
+  ctx.stroke();
 }
 
 function drawAlignOverlay() {
@@ -381,41 +440,35 @@ function drawAlignOverlay() {
   ctx.clearRect(0, 0, overlay.width, overlay.height);
   if (!corners) return;
 
+  _homography = getHomography();
+  if (!_homography) return;
+
+  const SEGS = 10; // points per grid line for smooth curves
+
   // Inner grid lines (cell boundaries)
   ctx.strokeStyle = 'rgba(0, 255, 0, 0.4)';
   ctx.lineWidth = 1;
   for (let i = 1; i < 15; i++) {
-    const t = i / 15;
-    ctx.beginPath();
-    for (let j = 0; j <= 30; j++) {
-      const [x, y] = bilinearPoint(j / 30, t);
-      j === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
-    }
-    ctx.stroke();
-    ctx.beginPath();
-    for (let j = 0; j <= 30; j++) {
-      const [x, y] = bilinearPoint(t, j / 30);
-      j === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
-    }
-    ctx.stroke();
+    // Horizontal line at y=i
+    const hPts = [];
+    for (let s = 0; s <= SEGS; s++) hPts.push(gridToCanvas(s / SEGS * 15, i));
+    drawGridLine(ctx, hPts);
+    // Vertical line at x=i
+    const vPts = [];
+    for (let s = 0; s <= SEGS; s++) vPts.push(gridToCanvas(i, s / SEGS * 15));
+    drawGridLine(ctx, vPts);
   }
 
-  // Outer border lines (thicker, brighter — the key alignment reference)
+  // Outer border lines (thicker, brighter)
   ctx.strokeStyle = 'rgba(0, 255, 0, 0.9)';
   ctx.lineWidth = 2;
-  for (const t of [0, 1]) {
-    ctx.beginPath();
-    for (let j = 0; j <= 30; j++) {
-      const [x, y] = bilinearPoint(j / 30, t);
-      j === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
-    }
-    ctx.stroke();
-    ctx.beginPath();
-    for (let j = 0; j <= 30; j++) {
-      const [x, y] = bilinearPoint(t, j / 30);
-      j === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
-    }
-    ctx.stroke();
+  for (const i of [0, 15]) {
+    const hPts = [];
+    for (let s = 0; s <= SEGS; s++) hPts.push(gridToCanvas(s / SEGS * 15, i));
+    drawGridLine(ctx, hPts);
+    const vPts = [];
+    for (let s = 0; s <= SEGS; s++) vPts.push(gridToCanvas(i, s / SEGS * 15));
+    drawGridLine(ctx, vPts);
   }
 
   // Corner handles (draggable grid corners)
