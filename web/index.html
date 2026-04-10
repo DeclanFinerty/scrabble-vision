@@ -16,6 +16,8 @@
     margin: 0 auto;
     aspect-ratio: 1;
     background: #000;
+    border: 4px solid transparent;
+    transition: border-color 0.4s ease;
   }
   .camera-wrap video, .camera-wrap img {
     width: 100%; height: 100%; object-fit: cover;
@@ -61,6 +63,7 @@
 
   .stats { text-align: center; padding: 12px; font-size: 13px; color: #888; }
   #file-input { display: none; }
+  .readiness-score { text-align: center; font-size: 12px; color: #666; padding: 2px; }
   .hidden { display: none !important; }
 </style>
 </head>
@@ -71,6 +74,7 @@
   <img id="preview-img" class="hidden" />
   <canvas id="overlay"></canvas>
 </div>
+<div class="readiness-score" id="readiness-score"></div>
 
 <div class="controls" id="camera-controls">
   <button id="capture-btn" disabled>Capture</button>
@@ -114,6 +118,8 @@ const captureCanvas = $('capture-canvas');
 const fileInput = $('file-input');
 const cameraControls = $('camera-controls');
 const alignControls = $('align-controls');
+const cameraWrap = $('camera-wrap');
+const readinessScoreEl = $('readiness-score');
 
 let currentBlob = null;
 let imageWidth = 0;
@@ -122,6 +128,17 @@ let imageHeight = 0;
 let corners = null;
 let dragging = -1;
 const GRAB_RADIUS = 30;
+
+function readinessColor(score) {
+  if (score < 0.3) {
+    const t = score / 0.3;
+    return `rgb(255,${Math.round(255 * t)},0)`;
+  } else if (score < 0.7) {
+    const t = (score - 0.3) / 0.4;
+    return `rgb(${Math.round(255 * (1 - t))},255,0)`;
+  }
+  return 'rgb(0,255,0)';
+}
 
 // ── State management ──
 
@@ -137,6 +154,8 @@ function showCamera() {
   currentBlob = null;
   setupOverlay();
   drawCameraGrid();
+  cameraWrap.style.borderColor = 'transparent';
+  readinessScoreEl.textContent = '';
   status.textContent = 'Align board with grid, then tap Capture';
 }
 
@@ -399,6 +418,8 @@ scanBtn.addEventListener('click', async () => {
       status.textContent = 'Error: ' + data.error;
     } else {
       renderBoard(data);
+      cameraWrap.style.borderColor = readinessColor(data.readiness_score);
+      readinessScoreEl.textContent = 'Readiness: ' + (data.readiness_score * 100).toFixed(0) + '%';
       status.textContent = 'Done — tap any cell to edit';
     }
   } catch (e) {

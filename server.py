@@ -70,6 +70,15 @@ def scan_image(image: np.ndarray, corners: np.ndarray = None,
     timings["classify_ms"] = (time.perf_counter() - t0) * 1000
     timings["total_ms"] = sum(timings.values())
 
+    weighted_sum = 0.0
+    weight_total = 0.0
+    for r in range(GRID_SIZE):
+        for c in range(GRID_SIZE):
+            w = 3.0 if board[r][c] != "." else 1.0
+            weighted_sum += w * confidence[r][c]
+            weight_total += w
+    readiness_score = min(1.0, max(0.0, weighted_sum / weight_total)) if weight_total > 0 else 0.0
+
     return {
         "board": board,
         "confidence": confidence,
@@ -78,6 +87,7 @@ def scan_image(image: np.ndarray, corners: np.ndarray = None,
         "empty_count": GRID_SIZE * GRID_SIZE - tile_count,
         "grid_method": grid.method,
         "timings": timings,
+        "readiness_score": round(readiness_score, 3),
     }
 
 
