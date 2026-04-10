@@ -55,15 +55,16 @@
   .board-grid input {
     width: 100%; aspect-ratio: 1; text-align: center;
     font-size: min(3.5vw, 18px); font-weight: 700;
-    border: 2px solid transparent; padding: 0; background: #2a2a2a; color: #fff;
+    border: 2px solid transparent; padding: 0;
+    background: #3a3a3a; color: #888;
     caret-color: transparent;
   }
-  .board-grid input.has-tile { background: #3a3520; color: #f5deb3; }
-  .board-grid input.conf-low { background: #4a3520; color: #ffaa44; }
-  .board-grid input.conf-vlow { background: #4a2020; color: #ff8888; }
-  .board-grid input.blank { font-style: italic; text-transform: lowercase; font-weight: 400; }
-  .board-grid input:focus { border-color: #4CAF50; z-index: 1; outline: none; }
-  .board-grid input.selected { border-color: #4CAF50; z-index: 1; }
+  .board-grid input.has-tile { background: #f0f0f0; color: #111; }
+  .board-grid input.conf-low { background: #fff3cd; color: #664d03; }
+  .board-grid input.conf-vlow { background: #f8d7da; color: #842029; }
+  .board-grid input.blank { font-style: italic; font-weight: 400; position: relative; }
+  .board-grid input:focus { outline: none; }
+  .board-grid input.selected { border: 3px solid #2196F3; z-index: 1; }
 
   .stats { text-align: center; padding: 12px; font-size: 13px; color: #888; }
   #file-input { display: none; }
@@ -86,6 +87,31 @@
     cursor: pointer; padding: 8px;
   }
   button.small { padding: 8px 14px; font-size: 13px; }
+
+  .board-hint {
+    text-align: center; font-size: 12px; color: #999; padding: 6px 8px;
+    max-width: 600px; margin: 0 auto;
+  }
+  .action-bar {
+    display: none; justify-content: center; gap: 8px; padding: 6px;
+    max-width: 600px; margin: 0 auto;
+  }
+  .action-bar.visible { display: flex; }
+  .action-bar button { padding: 10px 16px; font-size: 14px; min-height: 44px; }
+  #mobile-input {
+    position: absolute; left: -9999px; opacity: 0;
+    width: 1px; height: 1px;
+  }
+  .legend {
+    display: flex; flex-wrap: wrap; justify-content: center; gap: 10px;
+    padding: 6px 8px; font-size: 11px; color: #999;
+    max-width: 600px; margin: 0 auto;
+  }
+  .legend-item { display: flex; align-items: center; gap: 4px; }
+  .legend-swatch {
+    width: 14px; height: 14px; border-radius: 2px; border: 1px solid #555;
+    display: inline-block;
+  }
   .hidden { display: none !important; }
 </style>
 </head>
@@ -113,10 +139,22 @@
 <input type="file" id="file-input" accept="image/*">
 
 <div class="board-section" id="board-section">
+  <div class="board-hint">Tap a cell to select. Type a letter to fill, backspace to clear.</div>
   <div class="board-grid" id="board-grid"></div>
+  <div class="action-bar" id="action-bar">
+    <button id="kb-btn" class="blue small">A-Z</button>
+    <button id="blank-btn" class="secondary small">Blank</button>
+    <button id="clear-btn" class="red small">Clear</button>
+  </div>
+  <div class="legend" id="board-legend">
+    <span class="legend-item"><span class="legend-swatch" style="background:#f0f0f0"></span> High conf.</span>
+    <span class="legend-item"><span class="legend-swatch" style="background:#fff3cd"></span> Medium</span>
+    <span class="legend-item"><span class="legend-swatch" style="background:#f8d7da"></span> Low</span>
+    <span class="legend-item"><span class="legend-swatch" style="background:#f0f0f0;font-style:italic;font-size:10px;text-align:center;line-height:14px">a</span> Blank</span>
+  </div>
   <div class="stats" id="stats"></div>
   <div class="controls">
-    <button id="review-btn" class="blue small">Review Low Confidence</button>
+    <button id="review-btn" class="blue">Review Low Confidence</button>
   </div>
   <div class="controls">
     <button id="save-btn">Save Board</button>
@@ -128,6 +166,7 @@
     <button id="view-saved-btn" class="secondary small">Saved Boards</button>
   </div>
 </div>
+<input id="mobile-input" type="text" autocomplete="off" autocorrect="off" autocapitalize="characters">
 
 <div class="saved-boards" id="saved-boards">
   <h3>Saved Boards</h3>
@@ -487,6 +526,9 @@ const backFromSaved = $('back-from-saved');
 
 function cellAt(r, c) { return boardGrid.children[r * 15 + c]; }
 
+const actionBar = $('action-bar');
+const mobileInput = $('mobile-input');
+
 function selectCell(idx) {
   if (selectedCell >= 0 && boardGrid.children[selectedCell])
     boardGrid.children[selectedCell].classList.remove('selected');
@@ -494,20 +536,24 @@ function selectCell(idx) {
   if (idx >= 0 && boardGrid.children[idx]) {
     boardGrid.children[idx].classList.add('selected');
     boardGrid.children[idx].focus();
+    actionBar.classList.add('visible');
+  } else {
+    actionBar.classList.remove('visible');
   }
 }
 
 function updateCellStyle(input, r, c) {
   input.classList.remove('has-tile', 'conf-low', 'conf-vlow', 'blank');
   const val = boardData[r][c];
+  const isBlank = blankSet.has(`${r},${c}`);
   if (val !== '.') {
     input.classList.add('has-tile');
     const conf = confData[r][c];
     if (conf < 0.4) input.classList.add('conf-vlow');
     else if (conf < 0.7) input.classList.add('conf-low');
   }
-  if (blankSet.has(`${r},${c}`)) input.classList.add('blank');
-  input.value = val === '.' ? '' : (blankSet.has(`${r},${c}`) ? val.toLowerCase() : val);
+  if (isBlank) input.classList.add('blank');
+  input.value = val === '.' ? '' : (isBlank ? val.toLowerCase() + '*' : val);
 }
 
 // ── Board rendering ──
@@ -523,7 +569,7 @@ function renderBoard(data) {
     for (let c = 0; c < 15; c++) {
       const input = document.createElement('input');
       input.type = 'text';
-      input.maxLength = 1;
+      input.maxLength = 2;
       input.readOnly = true;
       input.dataset.r = r;
       input.dataset.c = c;
@@ -552,8 +598,11 @@ function renderBoard(data) {
     const t = data.timings;
     statsEl.textContent = `${data.tile_count} tiles | ${data.grid_method} grid | ` +
       `${t.total_ms.toFixed(0)}ms (grid ${t.grid_ms.toFixed(0)} + classify ${t.classify_ms.toFixed(0)})`;
+  } else {
+    statsEl.textContent = `${data.tile_count} tiles`;
   }
 
+  actionBar.classList.remove('visible');
   boardSection.classList.add('visible');
   savedBoardsEl.classList.remove('visible');
 }
@@ -593,6 +642,44 @@ function toggleBlank(r, c) {
   else blankSet.add(key);
   updateCellStyle(cellAt(r, c), r, c);
 }
+
+// ── Action bar (mobile) ──
+
+$('kb-btn').addEventListener('click', () => {
+  if (selectedCell < 0) return;
+  mobileInput.value = '';
+  mobileInput.focus();
+});
+
+mobileInput.addEventListener('input', () => {
+  if (selectedCell < 0) return;
+  const val = mobileInput.value.replace(/[^a-zA-Z]/g, '').toUpperCase();
+  mobileInput.value = '';
+  if (!val) return;
+  const r = Math.floor(selectedCell / 15);
+  const c = selectedCell % 15;
+  boardData[r][c] = val[0];
+  confData[r][c] = 1.0;
+  updateCellStyle(boardGrid.children[selectedCell], r, c);
+  if (c < 14) selectCell(r * 15 + c + 1);
+});
+
+$('blank-btn').addEventListener('click', () => {
+  if (selectedCell < 0) return;
+  const r = Math.floor(selectedCell / 15);
+  const c = selectedCell % 15;
+  toggleBlank(r, c);
+});
+
+$('clear-btn').addEventListener('click', () => {
+  if (selectedCell < 0) return;
+  const r = Math.floor(selectedCell / 15);
+  const c = selectedCell % 15;
+  boardData[r][c] = '.';
+  confData[r][c] = 1.0;
+  blankSet.delete(`${r},${c}`);
+  updateCellStyle(boardGrid.children[selectedCell], r, c);
+});
 
 // ── Review low confidence ──
 
