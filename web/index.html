@@ -119,6 +119,17 @@
     width: 14px; height: 14px; border-radius: 2px; border: 1px solid #555;
     display: inline-block;
   }
+  @keyframes flash-green {
+    0% { border-color: #0f0; }
+    100% { border-color: transparent; }
+  }
+  .flash-capture { animation: flash-green 0.6s ease-out; }
+  .settings-row {
+    display: flex; align-items: center; gap: 8px; justify-content: center;
+    padding: 4px 14px; font-size: 13px; color: #aaa;
+  }
+  .settings-row label { display: flex; align-items: center; gap: 4px; cursor: pointer; }
+  .settings-row input[type=range] { width: 80px; }
   .hidden { display: none !important; }
 </style>
 </head>
@@ -134,6 +145,10 @@
 <div class="controls" id="camera-controls">
   <button id="capture-btn" disabled>Capture</button>
   <button id="upload-btn" class="blue">Upload</button>
+</div>
+<div class="settings-row" id="settings-row">
+  <label><input type="checkbox" id="auto-capture-toggle" checked> Auto-capture</label>
+  <label>Threshold <input type="range" id="threshold-slider" min="50" max="100" step="5" value="75"><span id="threshold-val">0.75</span></label>
 </div>
 
 <div class="controls hidden" id="align-controls">
@@ -214,9 +229,21 @@ let imageWidth = 0;
 let imageHeight = 0;
 // Corners in image coordinates: [TL, TR, BR, BL]
 let corners = null;
-let autoDetectedCorners = null; // corners from auto-detect before user adjustment
+let autoDetectedCorners = null;
 let dragging = -1;
 const GRAB_RADIUS = 30;
+
+// ── Auto-capture constants ──
+const POLL_INTERVAL_MS = 500;
+const BUFFER_SIZE = 5;
+const TRIGGER_FRAMES = 3;
+const CORNER_STABILITY_THRESHOLD = 0.05;
+
+let pollTimer = null;
+let pollInFlight = false;
+let autoCaptureEnabled = localStorage.getItem('autoCapture') !== 'false';
+let readinessThreshold = parseFloat(localStorage.getItem('readinessThreshold') || '0.75');
+let frameBuffer = [];
 
 function readinessColor(score) {
   if (score < 0.3) {
@@ -232,9 +259,11 @@ function readinessColor(score) {
 // ── State management ──
 
 function showCamera() {
+  stopPolling();
   video.classList.remove('hidden');
   previewImg.classList.add('hidden');
   cameraControls.classList.remove('hidden');
+  $('settings-row').classList.remove('hidden');
   alignControls.classList.add('hidden');
   boardSection.classList.remove('visible');
   $('saved-boards').classList.remove('visible');
@@ -255,10 +284,12 @@ function showCamera() {
 }
 
 function showAlign(imgUrl) {
+  stopPolling();
   video.classList.add('hidden');
   previewImg.classList.remove('hidden');
   previewImg.src = imgUrl;
   cameraControls.classList.add('hidden');
+  $('settings-row').classList.add('hidden');
   alignControls.classList.remove('hidden');
   boardSection.classList.remove('visible');
   overlay.style.pointerEvents = 'auto';
@@ -282,11 +313,137 @@ async function startCamera() {
       setupOverlay();
       drawCameraGrid();
       captureBtn.disabled = false;
-      status.textContent = 'Align board with grid, then tap Capture';
+      startPolling();
+      status.textContent = autoCaptureEnabled
+        ? 'Point at board — auto-capture when aligned'
+        : 'Align board with grid, then tap Capture';
     });
   } catch (e) {
     status.textContent = 'Camera unavailable — use Upload instead';
   }
+}
+
+// ── Continuous polling ──
+
+function startPolling() {
+  stopPolling();
+  frameBuffer = [];
+  pollTimer = setInterval(pollFrame, POLL_INTERVAL_MS);
+}
+
+function stopPolling() {
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  pollInFlight = false;
+  frameBuffer = [];
+}
+
+function pollFrame() {
+  if (pollInFlight || !video.srcObject) return;
+  pollInFlight = true;
+
+  const vw = video.videoWidth, vh = video.videoHeight;
+  if (!vw || !vh) { pollInFlight = false; return; }
+  captureCanvas.width = vw;
+  captureCanvas.height = vh;
+  captureCanvas.getContext('2d').drawImage(video, 0, 0, vw, vh);
+
+  captureCanvas.toBlob(async blob => {
+    try {
+      const form = new FormData();
+      form.append('file', blob, 'poll.jpg');
+      const res = await fetch('/api/scan/quick', { method: 'POST', body: form });
+      const data = await res.json();
+      if (data.error) { pollInFlight = false; return; }
+
+      // Update visuals
+      const score = data.readiness_score;
+      cameraWrap.style.borderColor = readinessColor(score);
+      readinessScoreEl.textContent = score > 0 ? (score * 100).toFixed(0) + '%' : '';
+
+      // Draw corner dots on overlay
+      drawPollOverlay(data.detected_corners, data.image_width, data.image_height);
+
+      // Update status
+      if (autoCaptureEnabled) {
+        if (score >= readinessThreshold) {
+          const stable = isStable();
+          status.textContent = stable ? 'Aligned!' : 'Hold steady...';
+        } else if (score > 0) {
+          status.textContent = 'Aligning... adjust position';
+        } else {
+          status.textContent = 'Point at board — auto-capture when aligned';
+        }
+      }
+
+      // Push to buffer
+      frameBuffer.push({ score, corners: data.detected_corners, timestamp: Date.now() });
+      if (frameBuffer.length > BUFFER_SIZE) frameBuffer.shift();
+
+      // Check auto-capture
+      if (autoCaptureEnabled && checkAutoCapture()) {
+        triggerAutoCapture();
+      }
+    } catch (e) { /* network error, skip */ }
+    pollInFlight = false;
+  }, 'image/jpeg', 0.7);
+}
+
+function drawPollOverlay(detectedCorners, iw, ih) {
+  const ctx = overlay.getContext('2d');
+  drawCameraGrid();
+  if (!detectedCorners) return;
+  ctx.fillStyle = 'rgba(0, 255, 0, 0.8)';
+  for (const [x, y] of detectedCorners) {
+    const cx = x / iw * overlay.width;
+    const cy = y / ih * overlay.height;
+    ctx.beginPath();
+    ctx.arc(cx, cy, 6, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+function isStable() {
+  if (frameBuffer.length < TRIGGER_FRAMES) return false;
+  const recent = frameBuffer.slice(-TRIGGER_FRAMES);
+  if (recent.some(f => !f.corners)) return false;
+  const last = recent[recent.length - 1];
+  const iw = video.videoWidth || 1;
+  const ih = video.videoHeight || 1;
+  const maxDim = Math.max(iw, ih);
+  const thresh = CORNER_STABILITY_THRESHOLD * maxDim;
+  for (let ci = 0; ci < 4; ci++) {
+    for (const f of recent) {
+      const dx = Math.abs(f.corners[ci][0] - last.corners[ci][0]);
+      const dy = Math.abs(f.corners[ci][1] - last.corners[ci][1]);
+      if (dx > thresh || dy > thresh) return false;
+    }
+  }
+  return true;
+}
+
+function checkAutoCapture() {
+  if (frameBuffer.length < TRIGGER_FRAMES) return false;
+  const recent = frameBuffer.slice(-TRIGGER_FRAMES);
+  if (recent.some(f => f.score < readinessThreshold)) return false;
+  return isStable();
+}
+
+function triggerAutoCapture() {
+  stopPolling();
+  try { navigator.vibrate([50]); } catch {}
+  cameraWrap.classList.add('flash-capture');
+  setTimeout(() => cameraWrap.classList.remove('flash-capture'), 600);
+  status.textContent = 'Capturing...';
+
+  // Grab fresh high-quality frame and go through normal flow
+  const vw = video.videoWidth, vh = video.videoHeight;
+  captureCanvas.width = vw;
+  captureCanvas.height = vh;
+  captureCanvas.getContext('2d').drawImage(video, 0, 0, vw, vh);
+  captureCanvas.toBlob(blob => {
+    currentBlob = blob;
+    showAlign(URL.createObjectURL(blob));
+  }, 'image/jpeg', 0.92);
 }
 
 function setupOverlay() {
@@ -991,6 +1148,30 @@ async function openSavedBoard(id) {
     status.textContent = 'Load failed: ' + e.message;
   }
 }
+
+// ── Settings ──
+
+const autoToggle = $('auto-capture-toggle');
+const threshSlider = $('threshold-slider');
+const threshVal = $('threshold-val');
+
+autoToggle.checked = autoCaptureEnabled;
+threshSlider.value = Math.round(readinessThreshold * 100);
+threshVal.textContent = readinessThreshold.toFixed(2);
+
+autoToggle.addEventListener('change', () => {
+  autoCaptureEnabled = autoToggle.checked;
+  localStorage.setItem('autoCapture', autoCaptureEnabled);
+  status.textContent = autoCaptureEnabled
+    ? 'Point at board — auto-capture when aligned'
+    : 'Align board with grid, then tap Capture';
+});
+
+threshSlider.addEventListener('input', () => {
+  readinessThreshold = parseInt(threshSlider.value) / 100;
+  threshVal.textContent = readinessThreshold.toFixed(2);
+  localStorage.setItem('readinessThreshold', readinessThreshold);
+});
 
 // ── Init ──
 

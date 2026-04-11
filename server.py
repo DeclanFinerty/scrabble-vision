@@ -124,6 +124,57 @@ async def detect_corners(file: UploadFile = File(...)):
     }
 
 
+def _quick_readiness(corners: np.ndarray, image_shape: tuple) -> float:
+    """Compute readiness score from corner detection quality (no classifier)."""
+    h, w = image_shape[:2]
+    image_area = h * w
+    ordered = order_corners(corners)
+    area = cv2.contourArea(ordered)
+    area_frac = area / image_area
+    area_score = min(area_frac / 0.7, 1.0)
+
+    rect = cv2.minAreaRect(ordered)
+    rw, rh = rect[1]
+    if rw == 0 or rh == 0:
+        return 0.0
+    ratio = max(rw, rh) / min(rw, rh)
+    aspect_score = max(0.0, 1.0 - (ratio - 1.0) * 2)
+
+    return max(0.0, min(1.0, area_score * 0.6 + aspect_score * 0.4))
+
+
+@app.post("/api/scan/quick")
+async def quick_scan(file: UploadFile = File(...)):
+    image = _decode_image(await file.read())
+    if image is None:
+        return {"error": "Could not decode image"}
+
+    t0 = time.perf_counter()
+    h, w = image.shape[:2]
+    corners = auto_detect_corners(image)
+    timing_ms = int((time.perf_counter() - t0) * 1000)
+
+    if corners is not None:
+        ordered = order_corners(corners)
+        return {
+            "corners_detected": True,
+            "readiness_score": round(_quick_readiness(corners, image.shape), 3),
+            "detected_corners": ordered.tolist(),
+            "image_width": w,
+            "image_height": h,
+            "timing_ms": timing_ms,
+        }
+
+    return {
+        "corners_detected": False,
+        "readiness_score": 0.0,
+        "detected_corners": None,
+        "image_width": w,
+        "image_height": h,
+        "timing_ms": timing_ms,
+    }
+
+
 @app.post("/api/scan")
 async def scan(file: UploadFile = File(...), corners: str = Form(None)):
     image = _decode_image(await file.read())
