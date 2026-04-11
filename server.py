@@ -148,6 +148,7 @@ async def save_board(
     auto_detected_corners: str = Form("null"),
     final_corners: str = Form("null"),
     corners_were_adjusted: str = Form("false"),
+    original_scan: str = Form("null"),
 ):
     board_id = str(uuid.uuid4())[:8]
     board_dir = os.path.join(SAVED_BOARDS_DIR, board_id)
@@ -167,6 +168,7 @@ async def save_board(
         "auto_detected_corners": json.loads(auto_detected_corners),
         "final_corners": json.loads(final_corners),
         "corners_were_adjusted": json.loads(corners_were_adjusted),
+        "original_scan_result": json.loads(original_scan),
     }
     with open(os.path.join(board_dir, "board.json"), "w") as f:
         json.dump(meta, f)

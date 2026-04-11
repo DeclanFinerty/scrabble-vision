@@ -167,6 +167,83 @@ def print_side_by_side(predicted: list[list[str]], truth: list[list[str]]):
         print(f"  {true_row}    {pred_row}{suffix}")
 
 
+def classifier_accuracy_mode():
+    """Compare original scan results against user-corrected boards."""
+    import json
+
+    saved_dir = Path("saved_boards")
+    if not saved_dir.is_dir():
+        print("No saved_boards/ directory found.")
+        return
+
+    boards_with_both = []
+    total_boards = 0
+    for d in sorted(saved_dir.iterdir()):
+        meta_path = d / "board.json"
+        if not meta_path.is_file():
+            continue
+        with open(meta_path) as f:
+            meta = json.load(f)
+        total_boards += 1
+        scan = meta.get("original_scan_result")
+        user_board = meta.get("board")
+        if scan and user_board and scan.get("board"):
+            boards_with_both.append(meta)
+
+    if not boards_with_both:
+        print(f"No boards with both original_scan_result and user-corrected board.")
+        print(f"({total_boards} total boards in saved_boards/)")
+        return
+
+    # Aggregate stats
+    per_class_correct = defaultdict(int)
+    per_class_total = defaultdict(int)
+    confusion = defaultdict(int)
+    total_correct = 0
+    total_cells = 0
+
+    for meta in boards_with_both:
+        scan_board = meta["original_scan_result"]["board"]
+        user_board = meta["board"]
+
+        for r in range(GRID_SIZE):
+            for c in range(GRID_SIZE):
+                pred = scan_board[r][c]
+                true = user_board[r][c]
+                total_cells += 1
+
+                true_class = true if true != "." else "EMPTY"
+                per_class_total[true_class] += 1
+
+                if pred == true:
+                    total_correct += 1
+                    per_class_correct[true_class] += 1
+                else:
+                    pred_class = pred if pred != "." else "EMPTY"
+                    confusion[(true_class, pred_class)] += 1
+
+    print(f"Classifier Accuracy Report")
+    print(f"{'=' * 50}")
+    print(f"Boards evaluated: {len(boards_with_both)} / {total_boards} total")
+    print(f"Total cells: {total_cells}")
+    print(f"Overall accuracy: {total_correct}/{total_cells} "
+          f"({total_correct / total_cells:.1%})")
+
+    # Per-class breakdown
+    print(f"\nPer-class accuracy:")
+    for cls in sorted(per_class_total.keys()):
+        correct = per_class_correct.get(cls, 0)
+        total = per_class_total[cls]
+        print(f"  {cls:>5s}: {correct:4d}/{total:4d} ({correct / total:.1%})")
+
+    # Confusion pairs
+    if confusion:
+        sorted_conf = sorted(confusion.items(), key=lambda x: x[1], reverse=True)
+        print(f"\nMost common confusion pairs:")
+        for (true, pred), count in sorted_conf[:20]:
+            print(f"  {true} -> {pred}: {count}")
+
+
 def label_corners_mode():
     """Interactive corner labeling for saved boards."""
     import json
@@ -294,10 +371,15 @@ def main():
     parser.add_argument("--model", default="models/tile_classifier.pt")
     parser.add_argument("--label-corners", action="store_true",
                         help="Interactive corner labeling for saved boards")
+    parser.add_argument("--classifier-accuracy", action="store_true",
+                        help="Compare classifier output vs user corrections")
     args = parser.parse_args()
 
     if args.label_corners:
         label_corners_mode()
+        return
+    if args.classifier_accuracy:
+        classifier_accuracy_mode()
         return
 
     CORNERS_DIR.mkdir(exist_ok=True)

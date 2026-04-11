@@ -236,6 +236,7 @@ function showCamera() {
   overlay.style.pointerEvents = 'none';
   corners = null;
   autoDetectedCorners = null;
+  originalScanResult = null;
   currentBlob = null;
   setupOverlay();
   drawCameraGrid();
@@ -565,6 +566,7 @@ scanBtn.addEventListener('click', async () => {
     if (data.error) {
       status.textContent = 'Error: ' + data.error;
     } else {
+      originalScanResult = JSON.parse(JSON.stringify(data));
       renderBoard(data);
       cameraWrap.style.borderColor = readinessColor(data.readiness_score);
       readinessScoreEl.textContent = 'Readiness: ' + (data.readiness_score * 100).toFixed(0) + '%';
@@ -583,6 +585,7 @@ let boardData = null;   // current board array 15x15
 let confData = null;    // confidence array 15x15
 let blankSet = new Set(); // set of "r,c" keys for blank tiles
 let selectedCell = -1;  // flat index of selected cell
+let originalScanResult = null; // deep copy of /api/scan response before user edits
 
 const reviewBtn = $('review-btn');
 const saveBtn = $('save-btn');
@@ -827,6 +830,7 @@ saveBtn.addEventListener('click', async () => {
   form.append('auto_detected_corners', JSON.stringify(autoDetectedCorners));
   form.append('final_corners', JSON.stringify(corners));
   form.append('corners_were_adjusted', JSON.stringify(cornersAdjusted));
+  form.append('original_scan', JSON.stringify(originalScanResult));
 
   try {
     const res = await fetch('/api/boards/save', { method: 'POST', body: form });
