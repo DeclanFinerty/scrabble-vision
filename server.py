@@ -143,7 +143,6 @@ async def save_board(
     file: UploadFile = File(...),
     board: str = Form(...),
     blanks: str = Form("[]"),
-    confidence: str = Form("[]"),
     name: str = Form(""),
     auto_detected_corners: str = Form("null"),
     final_corners: str = Form("null"),
@@ -171,7 +170,6 @@ async def save_board(
         # Update mutable fields, preserve immutable ones
         meta["board"] = json.loads(board)
         meta["blanks"] = json.loads(blanks)
-        meta["confidence"] = json.loads(confidence)
         meta["final_corners"] = json.loads(final_corners)
         meta["corners_were_adjusted"] = json.loads(corners_were_adjusted)
         meta["updated_at"] = now
@@ -183,7 +181,6 @@ async def save_board(
             "id": board_id,
             "board": json.loads(board),
             "blanks": json.loads(blanks),
-            "confidence": json.loads(confidence),
             "name": name or f"Board {board_id}",
             "created_at": now,
             "updated_at": now,

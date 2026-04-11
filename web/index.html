@@ -889,7 +889,6 @@ saveBtn.addEventListener('click', async () => {
   form.append('file', currentBlob, 'capture.jpg');
   form.append('board', JSON.stringify(boardData));
   form.append('blanks', JSON.stringify(Array.from(blankSet).map(k => k.split(',').map(Number))));
-  form.append('confidence', JSON.stringify(confData));
   form.append('auto_detected_corners', JSON.stringify(autoDetectedCorners));
   form.append('final_corners', JSON.stringify(corners));
   form.append('corners_were_adjusted', JSON.stringify(cornersAdjusted));
@@ -971,9 +970,12 @@ async function openSavedBoard(id) {
     currentBlob = await imgRes.blob();
     currentBoardId = id;
 
+    const conf = (data.original_scan_result && data.original_scan_result.confidence)
+      || data.confidence
+      || data.board.map(r => r.map(() => 1.0));
     renderBoard({
       board: data.board,
-      confidence: data.confidence || data.board.map(r => r.map(() => 1.0)),
+      confidence: conf,
       uncertain: [],
       tile_count: data.board.flat().filter(c => c !== '.').length,
       timings: null,
