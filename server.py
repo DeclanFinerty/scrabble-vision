@@ -149,8 +149,14 @@ async def save_board(
     final_corners: str = Form("null"),
     corners_were_adjusted: str = Form("false"),
     original_scan: str = Form("null"),
+    board_id: str = Form(""),
 ):
-    board_id = str(uuid.uuid4())[:8]
+    now = datetime.now(timezone.utc).isoformat()
+    is_update = bool(board_id) and os.path.isdir(os.path.join(SAVED_BOARDS_DIR, board_id))
+
+    if not is_update:
+        board_id = str(uuid.uuid4())[:8]
+
     board_dir = os.path.join(SAVED_BOARDS_DIR, board_id)
     os.makedirs(board_dir, exist_ok=True)
 
@@ -158,22 +164,39 @@ async def save_board(
     with open(os.path.join(board_dir, "image.jpg"), "wb") as f:
         f.write(img_bytes)
 
-    meta = {
-        "id": board_id,
-        "board": json.loads(board),
-        "blanks": json.loads(blanks),
-        "confidence": json.loads(confidence),
-        "name": name or f"Board {board_id}",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "auto_detected_corners": json.loads(auto_detected_corners),
-        "final_corners": json.loads(final_corners),
-        "corners_were_adjusted": json.loads(corners_were_adjusted),
-        "original_scan_result": json.loads(original_scan),
-    }
+    if is_update:
+        meta_path = os.path.join(board_dir, "board.json")
+        with open(meta_path) as f:
+            meta = json.load(f)
+        # Update mutable fields, preserve immutable ones
+        meta["board"] = json.loads(board)
+        meta["blanks"] = json.loads(blanks)
+        meta["confidence"] = json.loads(confidence)
+        meta["final_corners"] = json.loads(final_corners)
+        meta["corners_were_adjusted"] = json.loads(corners_were_adjusted)
+        meta["updated_at"] = now
+        scan_data = json.loads(original_scan)
+        if scan_data is not None:
+            meta["original_scan_result"] = scan_data
+    else:
+        meta = {
+            "id": board_id,
+            "board": json.loads(board),
+            "blanks": json.loads(blanks),
+            "confidence": json.loads(confidence),
+            "name": name or f"Board {board_id}",
+            "created_at": now,
+            "updated_at": now,
+            "auto_detected_corners": json.loads(auto_detected_corners),
+            "final_corners": json.loads(final_corners),
+            "corners_were_adjusted": json.loads(corners_were_adjusted),
+            "original_scan_result": json.loads(original_scan),
+        }
+
     with open(os.path.join(board_dir, "board.json"), "w") as f:
         json.dump(meta, f)
 
-    return {"id": board_id, "name": meta["name"], "timestamp": meta["timestamp"]}
+    return {"id": board_id, "name": meta.get("name", board_id), "timestamp": now}
 
 
 @app.get("/api/boards")
