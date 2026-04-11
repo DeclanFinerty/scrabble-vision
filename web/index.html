@@ -204,6 +204,7 @@ let imageWidth = 0;
 let imageHeight = 0;
 // Corners in image coordinates: [TL, TR, BR, BL]
 let corners = null;
+let autoDetectedCorners = null; // corners from auto-detect before user adjustment
 let dragging = -1;
 const GRAB_RADIUS = 30;
 
@@ -230,6 +231,7 @@ function showCamera() {
   overlay.getContext('2d').clearRect(0, 0, overlay.width, overlay.height);
   overlay.style.pointerEvents = 'none';
   corners = null;
+  autoDetectedCorners = null;
   currentBlob = null;
   setupOverlay();
   drawCameraGrid();
@@ -338,6 +340,7 @@ async function detectCorners() {
     imageWidth = data.image_width;
     imageHeight = data.image_height;
     corners = data.corners; // [[x,y], ...] TL, TR, BR, BL in image coords
+    autoDetectedCorners = data.detected ? corners.map(c => [...c]) : null;
     drawAlignOverlay();
     status.textContent = data.detected
       ? 'Align grid to board lines, then tap Scan'
@@ -350,6 +353,7 @@ async function detectCorners() {
     imageWidth = img.naturalWidth || 1;
     imageHeight = img.naturalHeight || 1;
     corners = [[0, 0], [imageWidth, 0], [imageWidth, imageHeight], [0, imageHeight]];
+    autoDetectedCorners = null;
     drawAlignOverlay();
   }
 }
@@ -808,11 +812,19 @@ saveBtn.addEventListener('click', async () => {
   saveBtn.disabled = true;
   status.textContent = 'Saving...';
 
+  const cornersAdjusted = autoDetectedCorners && corners
+    ? corners.some((c, i) => Math.abs(c[0] - autoDetectedCorners[i][0]) > 1 ||
+                              Math.abs(c[1] - autoDetectedCorners[i][1]) > 1)
+    : corners !== null;
+
   const form = new FormData();
   form.append('file', currentBlob, 'capture.jpg');
   form.append('board', JSON.stringify(boardData));
   form.append('blanks', JSON.stringify(Array.from(blankSet).map(k => k.split(',').map(Number))));
   form.append('confidence', JSON.stringify(confData));
+  form.append('auto_detected_corners', JSON.stringify(autoDetectedCorners));
+  form.append('final_corners', JSON.stringify(corners));
+  form.append('corners_were_adjusted', JSON.stringify(cornersAdjusted));
 
   try {
     const res = await fetch('/api/boards/save', { method: 'POST', body: form });
@@ -855,6 +867,7 @@ async function loadSavedBoards() {
           <div class="name">${b.name}</div>
           <div class="date">${d.toLocaleDateString()} ${d.toLocaleTimeString()}</div>
         </div>
+        <a href="/boards/${b.id}/edit-corners" class="del-btn" title="Edit corners" style="color:#2196F3;text-decoration:none;font-size:14px">&#9881;</a>
         <button class="del-btn" data-id="${b.id}">&times;</button>
       `;
       item.querySelector('.info').addEventListener('click', () => openSavedBoard(b.id));

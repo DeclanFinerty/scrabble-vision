@@ -12,7 +12,7 @@ import uuid
 import os
 import shutil
 from datetime import datetime, timezone
-from fastapi import FastAPI, UploadFile, File, Form
+from fastapi import FastAPI, UploadFile, File, Form, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 import json
@@ -145,6 +145,9 @@ async def save_board(
     blanks: str = Form("[]"),
     confidence: str = Form("[]"),
     name: str = Form(""),
+    auto_detected_corners: str = Form("null"),
+    final_corners: str = Form("null"),
+    corners_were_adjusted: str = Form("false"),
 ):
     board_id = str(uuid.uuid4())[:8]
     board_dir = os.path.join(SAVED_BOARDS_DIR, board_id)
@@ -161,6 +164,9 @@ async def save_board(
         "confidence": json.loads(confidence),
         "name": name or f"Board {board_id}",
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "auto_detected_corners": json.loads(auto_detected_corners),
+        "final_corners": json.loads(final_corners),
+        "corners_were_adjusted": json.loads(corners_were_adjusted),
     }
     with open(os.path.join(board_dir, "board.json"), "w") as f:
         json.dump(meta, f)
@@ -211,6 +217,26 @@ async def delete_board(board_id: str):
         return JSONResponse({"error": "Not found"}, status_code=404)
     shutil.rmtree(board_dir)
     return {"deleted": board_id}
+
+
+@app.api_route("/api/boards/{board_id}/corners", methods=["PATCH"])
+async def update_board_corners(board_id: str, request: Request):
+    meta_path = os.path.join(SAVED_BOARDS_DIR, board_id, "board.json")
+    if not os.path.isfile(meta_path):
+        return JSONResponse({"error": "Not found"}, status_code=404)
+    body = await request.json()
+    with open(meta_path) as f:
+        meta = json.load(f)
+    meta["final_corners"] = body["final_corners"]
+    meta["corners_were_adjusted"] = True
+    with open(meta_path, "w") as f:
+        json.dump(meta, f)
+    return {"ok": True}
+
+
+@app.get("/boards/{board_id}/edit-corners")
+async def edit_corners_page(board_id: str):
+    return FileResponse("web/edit-corners.html")
 
 
 @app.get("/")
