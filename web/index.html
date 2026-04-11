@@ -148,7 +148,7 @@
 </div>
 <div class="settings-row" id="settings-row">
   <label><input type="checkbox" id="auto-capture-toggle" checked> Auto-capture</label>
-  <label>Threshold <input type="range" id="threshold-slider" min="50" max="100" step="5" value="75"><span id="threshold-val">0.75</span></label>
+  <label>Threshold <input type="range" id="threshold-slider" min="50" max="100" step="5" value="85"><span id="threshold-val">0.85</span></label>
 </div>
 
 <div class="controls hidden" id="align-controls">
@@ -242,7 +242,7 @@ const CORNER_STABILITY_THRESHOLD = 0.05;
 let pollTimer = null;
 let pollInFlight = false;
 let autoCaptureEnabled = localStorage.getItem('autoCapture') !== 'false';
-let readinessThreshold = parseFloat(localStorage.getItem('readinessThreshold') || '0.75');
+let readinessThreshold = parseFloat(localStorage.getItem('readinessThreshold') || '0.85');
 let frameBuffer = [];
 
 function readinessColor(score) {
@@ -280,7 +280,10 @@ function showCamera() {
   drawCameraGrid();
   cameraWrap.style.borderColor = 'transparent';
   readinessScoreEl.textContent = '';
-  status.textContent = 'Align board with grid, then tap Capture';
+  status.textContent = autoCaptureEnabled
+    ? 'Point at board — auto-capture when aligned'
+    : 'Align board with grid, then tap Capture';
+  if (video.srcObject) startPolling();
 }
 
 function showAlign(imgUrl) {
