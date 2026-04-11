@@ -234,11 +234,6 @@ async def update_board_corners(board_id: str, request: Request):
     return {"ok": True}
 
 
-@app.get("/boards/{board_id}/edit-corners")
-async def edit_corners_page(board_id: str):
-    return FileResponse("web/edit-corners.html")
-
-
 @app.get("/")
 async def index():
     return FileResponse("web/index.html")
