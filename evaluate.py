@@ -96,10 +96,13 @@ def compare_boards(predicted: list[list[str]], truth: list[list[str]]) -> dict:
             pred = predicted[r][c]
             true = truth[r][c]
 
-            is_true_letter = true not in (".", "_")
+            # Ground truth uses lowercase letters (or legacy '_') for blank
+            # tiles. We don't evaluate those — treat them as empty cells,
+            # same as before the lowercase migration.
+            is_true_letter = true.isupper()
             is_pred_letter = pred != "."
 
-            if true in (".", "_"):
+            if not is_true_letter:
                 empty_total += 1
                 if pred == ".":
                     empty_correct += 1

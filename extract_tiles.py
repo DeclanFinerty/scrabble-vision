@@ -106,7 +106,9 @@ def main():
         for row, col, cell_img in cell_images:
             letter = truth[row][col]
 
-            if letter == "_":
+            # Blank tiles: lowercase letter indicates the letter the blank is
+            # playing as. They have no printed face, so skip from training.
+            if letter.islower() or letter == "_":
                 continue
 
             if letter == ".":
