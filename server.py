@@ -1,8 +1,8 @@
 """
 FastAPI backend for the Scrabble board scanner.
 
-Run with: uv run uvicorn server:app --host 0.0.0.0 --port 8000
-Open http://<your-ip>:8000 on your phone.
+Run with: uv run uvicorn server:app --host 0.0.0.0 --port 8001
+Open http://<your-ip>:8001 on your phone.
 """
 
 import cv2
