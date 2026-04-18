@@ -185,13 +185,11 @@
 
 <div class="bottom-bar" id="edit-bar">
   <span class="edit-label" id="edit-label">Editing</span>
-  <button id="kb-btn" class="blue small">A-Z</button>
   <button id="blank-btn" class="secondary small">Blank</button>
-  <button id="clear-btn" class="red small">Clear</button>
   <button id="done-btn" class="secondary small">Done</button>
 </div>
 
-<input id="mobile-input" type="text" autocomplete="off" autocorrect="off" autocapitalize="characters">
+<input id="mobile-input" type="text" name="scrabble-letter" autocomplete="off" autocorrect="off" autocapitalize="characters" spellcheck="false" enterkeyhint="done" data-lpignore="true" data-form-type="other">
 
 <div class="saved-boards" id="saved-boards">
   <h3>Saved Boards</h3>
@@ -687,10 +685,14 @@ function findNearestCorner(cx, cy) {
 
 function onPointerDown(e) {
   if (!corners) return;
-  e.preventDefault();
   const [cx, cy] = getEventPos(e);
   dragging = findNearestCorner(cx, cy);
-  if (dragging >= 0) drawAlignOverlay();
+  // Only swallow the event if we actually grabbed a corner handle, so touches
+  // elsewhere on the image still let the page scroll.
+  if (dragging >= 0) {
+    e.preventDefault();
+    drawAlignOverlay();
+  }
 }
 
 function onPointerMove(e) {
@@ -755,6 +757,7 @@ let boardData = null;   // current board array 15x15
 let confData = null;    // confidence array 15x15
 let blankSet = new Set(); // set of "r,c" keys for blank tiles
 let selectedCell = -1;  // flat index of selected cell
+let editDirection = 'across'; // 'across' | 'down' — sticky typing direction
 let originalScanResult = null; // deep copy of /api/scan response before user edits
 let hasUnsavedEdits = false;
 let currentBoardId = null;
@@ -791,8 +794,19 @@ function enterViewMode() {
     boardGrid.children[selectedCell].classList.remove('selected');
   selectedCell = -1;
   editBar.classList.remove('visible');
-  if (boardSection.classList.contains('visible'))
+  if (boardSection.classList.contains('visible')) {
     viewBar.classList.add('visible');
+    alignControls.classList.remove('hidden');
+  }
+}
+
+function inferDirection(r, c) {
+  const hasAcross = (c > 0  && boardData[r][c - 1] !== '.') ||
+                    (c < 14 && boardData[r][c + 1] !== '.');
+  const hasDown   = (r > 0  && boardData[r - 1][c] !== '.') ||
+                    (r < 14 && boardData[r + 1][c] !== '.');
+  if (hasDown && !hasAcross) editDirection = 'down';
+  else if (hasAcross && !hasDown) editDirection = 'across';
 }
 
 function enterEditMode(idx) {
@@ -801,15 +815,32 @@ function enterEditMode(idx) {
   selectedCell = idx;
   const el = boardGrid.children[idx];
   el.classList.add('selected');
-  el.focus({ preventScroll: true });
+  // If the soft keyboard is already up (mobileInput focused), keep it there by
+  // re-focusing mobileInput. Otherwise focus the grid cell — grid inputs have
+  // inputmode="none", so focusing them never opens the keyboard.
+  if (document.activeElement === mobileInput) mobileInput.focus();
+  else el.focus({ preventScroll: true });
   const r = Math.floor(idx / 15), c = idx % 15;
   editLabel.textContent = `(${r},${c})`;
   viewBar.classList.remove('visible');
+  alignControls.classList.add('hidden');
   editBar.classList.add('visible');
 }
 
-function selectCell(idx) {
+// selectCell(idx, { skipInference }) — if idx equals the currently selected
+// cell, flip direction (crossword-style tap-to-toggle). skipInference is used
+// for auto-advance / backspace hops where we must not re-run neighbour rules.
+function selectCell(idx, opts) {
+  const skipInference = opts && opts.skipInference;
   if (idx >= 0 && boardGrid.children[idx]) {
+    if (idx === selectedCell) {
+      editDirection = editDirection === 'across' ? 'down' : 'across';
+      return;
+    }
+    if (!skipInference) {
+      const r = Math.floor(idx / 15), c = idx % 15;
+      inferDirection(r, c);
+    }
     enterEditMode(idx);
   } else {
     enterViewMode();
@@ -848,6 +879,7 @@ function renderBoard(data) {
   confData = data.confidence.map(row => [...row]);
   blankSet = new Set();
   selectedCell = -1;
+  editDirection = 'across';
 
   for (let r = 0; r < 15; r++) {
     for (let c = 0; c < 15; c++) {
@@ -855,12 +887,18 @@ function renderBoard(data) {
       input.type = 'text';
       input.maxLength = 2;
       input.readOnly = true;
+      input.inputMode = 'none'; // never trigger OS soft keyboard on grid tap
       input.dataset.r = r;
       input.dataset.c = c;
       input.title = `(${r},${c}) ${(confData[r][c] * 100).toFixed(0)}%`;
       updateCellStyle(input, r, c);
 
-      input.addEventListener('click', () => selectCell(r * 15 + c));
+      input.addEventListener('click', () => {
+        selectCell(r * 15 + c);
+        // User tapped a tile — open the soft keyboard. Runs inside a user
+        // gesture so mobile browsers will actually surface the keyboard.
+        mobileInput.focus();
+      });
       let lastTap = 0;
       input.addEventListener('touchend', e => {
         const now = Date.now();
@@ -895,32 +933,62 @@ function renderBoard(data) {
 
 // ── Keyboard navigation ──
 
+function stepFrom(r, c, dir, delta) {
+  if (dir === 'across') {
+    const nc = c + delta;
+    if (nc < 0 || nc > 14) return -1;
+    return r * 15 + nc;
+  }
+  const nr = r + delta;
+  if (nr < 0 || nr > 14) return -1;
+  return nr * 15 + c;
+}
+
+function commitLetter(r, c, letter) {
+  boardData[r][c] = letter.toUpperCase();
+  if (confData[r][c] < 1.0) confData[r][c] = 1.0;
+  updateCellStyle(boardGrid.children[r * 15 + c], r, c);
+  markDirty();
+  const next = stepFrom(r, c, editDirection, 1);
+  if (next >= 0) selectCell(next, { skipInference: true });
+}
+
+function clearAndStepBack(r, c) {
+  boardData[r][c] = '.';
+  confData[r][c] = 1.0;
+  blankSet.delete(`${r},${c}`);
+  updateCellStyle(boardGrid.children[r * 15 + c], r, c);
+  markDirty();
+  const prev = stepFrom(r, c, editDirection, -1);
+  if (prev >= 0) selectCell(prev, { skipInference: true });
+}
+
 document.addEventListener('keydown', e => {
   if (selectedCell < 0 || !boardSection.classList.contains('visible')) return;
   const r = Math.floor(selectedCell / 15);
   const c = selectedCell % 15;
 
-  if (e.key === 'ArrowUp' && r > 0) { e.preventDefault(); selectCell((r - 1) * 15 + c); }
-  else if (e.key === 'ArrowDown' && r < 14) { e.preventDefault(); selectCell((r + 1) * 15 + c); }
-  else if (e.key === 'ArrowLeft' && c > 0) { e.preventDefault(); selectCell(r * 15 + c - 1); }
-  else if (e.key === 'ArrowRight' && c < 14) { e.preventDefault(); selectCell(r * 15 + c + 1); }
-  else if (e.key === 'Backspace' || e.key === 'Delete') {
+  if (e.key === 'ArrowUp' && r > 0) {
+    e.preventDefault(); editDirection = 'down';
+    selectCell((r - 1) * 15 + c, { skipInference: true });
+  } else if (e.key === 'ArrowDown' && r < 14) {
+    e.preventDefault(); editDirection = 'down';
+    selectCell((r + 1) * 15 + c, { skipInference: true });
+  } else if (e.key === 'ArrowLeft' && c > 0) {
+    e.preventDefault(); editDirection = 'across';
+    selectCell(r * 15 + c - 1, { skipInference: true });
+  } else if (e.key === 'ArrowRight' && c < 14) {
+    e.preventDefault(); editDirection = 'across';
+    selectCell(r * 15 + c + 1, { skipInference: true });
+  } else if (e.key === 'Backspace' || e.key === 'Delete') {
     e.preventDefault();
-    boardData[r][c] = '.';
-    confData[r][c] = 1.0;
-    blankSet.delete(`${r},${c}`);
-    updateCellStyle(boardGrid.children[selectedCell], r, c);
-    markDirty();
+    clearAndStepBack(r, c);
   } else if (e.key === 'Escape') {
     e.preventDefault();
     enterViewMode();
   } else if (/^[a-zA-Z]$/.test(e.key)) {
     e.preventDefault();
-    boardData[r][c] = e.key.toUpperCase();
-    if (confData[r][c] < 1.0) confData[r][c] = 1.0;
-    updateCellStyle(boardGrid.children[selectedCell], r, c);
-    markDirty();
-    if (c < 14) selectCell(r * 15 + c + 1);
+    commitLetter(r, c, e.key);
   }
 });
 
@@ -937,12 +1005,6 @@ function toggleBlank(r, c) {
 
 // ── Action bar (mobile) ──
 
-$('kb-btn').addEventListener('click', () => {
-  if (selectedCell < 0) return;
-  mobileInput.value = '';
-  mobileInput.focus();
-});
-
 mobileInput.addEventListener('input', () => {
   if (selectedCell < 0) return;
   const val = mobileInput.value.replace(/[^a-zA-Z]/g, '').toUpperCase();
@@ -950,11 +1012,7 @@ mobileInput.addEventListener('input', () => {
   if (!val) return;
   const r = Math.floor(selectedCell / 15);
   const c = selectedCell % 15;
-  boardData[r][c] = val[0];
-  confData[r][c] = 1.0;
-  updateCellStyle(boardGrid.children[selectedCell], r, c);
-  markDirty();
-  if (c < 14) selectCell(r * 15 + c + 1);
+  commitLetter(r, c, val[0]);
 });
 
 $('blank-btn').addEventListener('click', () => {
@@ -962,17 +1020,8 @@ $('blank-btn').addEventListener('click', () => {
   const r = Math.floor(selectedCell / 15);
   const c = selectedCell % 15;
   toggleBlank(r, c);
-});
-
-$('clear-btn').addEventListener('click', () => {
-  if (selectedCell < 0) return;
-  const r = Math.floor(selectedCell / 15);
-  const c = selectedCell % 15;
-  boardData[r][c] = '.';
-  confData[r][c] = 1.0;
-  blankSet.delete(`${r},${c}`);
-  updateCellStyle(boardGrid.children[selectedCell], r, c);
-  markDirty();
+  const next = stepFrom(r, c, editDirection, 1);
+  if (next >= 0) selectCell(next, { skipInference: true });
 });
 
 $('done-btn').addEventListener('click', enterViewMode);
