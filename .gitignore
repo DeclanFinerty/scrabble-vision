@@ -6,16 +6,13 @@ venv/
 .venv/
 *.lock
 
-# Generated data (not tracked)
-data/train/
-data/test/
-data/real_tiles/
-data/raw_boards/debug/
+# Data pipeline (not tracked, except README)
+data/
+!data/README.md
 
 # Debug outputs
 debug_*.jpg
 corners.npy
-data/raw_boards/debug_corners/
 
 # User data
 saved_boards/
