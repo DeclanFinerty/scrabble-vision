@@ -346,18 +346,43 @@ def _grid_overlay_lines(corners: np.ndarray, output_size: int = 900) -> list:
 
 class GridFitUI:
     """
-    Interactive grid fitting: shows auto-detected grid overlay with
-    draggable corners. Press Enter to confirm, R to reset, Q to quit.
+    Interactive grid fitting. Two driving modes:
+      - run() — keyboard-driven (Enter/R/Q). Used by scan.py --interactive.
+      - run_until_action(buttons=...) — click-driven button strip rendered
+        below the image. Used by verify_corners.py because cv2 keyboard
+        input is unreliable on Linux/Wayland.
+
+    The mouse callback never re-enters cv2.waitKey itself; it just
+    updates self.corners and sets a dirty flag. The owning loop reads
+    that flag and repaints. This avoids a Qt event-loop reentrancy
+    storm during fast drags that was leaving stdin in a broken state.
     """
 
     GRAB_RADIUS = 20
     CORNER_LABELS = ["TL", "TR", "BR", "BL"]
+    BUTTON_HEIGHT = 48
+    DEFAULT_MAX_DISPLAY = 800
+    DEFAULT_VERIFY_BUTTONS = (
+        ("Verify", "verify", (60, 160, 60)),
+        ("Reset",  "reset",  (40, 140, 200)),
+        ("Skip",   "skip",   (140, 140, 140)),
+        ("Reject", "reject", (50, 50, 200)),
+        ("Quit",   "quit",   (40, 40, 100)),
+    )
 
-    def __init__(self, image: np.ndarray, initial_corners: np.ndarray = None):
+    def __init__(self, image: np.ndarray,
+                 initial_corners: np.ndarray = None,
+                 max_display: int = DEFAULT_MAX_DISPLAY):
         self.original = image
+        self.max_display = max_display
         self.scale = 1.0
         self.display_base = self._compute_display()
         self.dragging = -1
+        self._opened = False
+        self._dirty = True
+        self._buttons: tuple = ()  # (label, action, bgr) tuples
+        self._title_text = ""
+        self._action: str | None = None
 
         if initial_corners is not None:
             self.corners = order_corners(initial_corners).copy()
@@ -367,35 +392,41 @@ class GridFitUI:
                 [0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]
             ], dtype=np.float32)
 
+        # Clip seed corners to image bounds so handles can never start
+        # off-screen (some COCO bbox seeds land just outside).
+        h, w = image.shape[:2]
+        self.corners[:, 0] = np.clip(self.corners[:, 0], 0, w - 1)
+        self.corners[:, 1] = np.clip(self.corners[:, 1], 0, h - 1)
+
         self.auto_corners = self.corners.copy()
-        self.window_name = "Grid Fit — drag corners, Enter=confirm, R=reset, Q=quit"
+        # ASCII only: an em-dash in the Qt window name makes namedWindow
+        # silently fail to register on Linux/XCB, breaking setMouseCallback.
+        self.window_name = "Grid Fit - drag corners"
 
     def _compute_display(self) -> np.ndarray:
         h, w = self.original.shape[:2]
-        max_dim = 1000
-        if max(h, w) > max_dim:
-            self.scale = max_dim / max(h, w)
-            return cv2.resize(self.original,
-                              (int(w * self.scale), int(h * self.scale)))
+        if max(h, w) > self.max_display:
+            self.scale = self.max_display / max(h, w)
+            return cv2.resize(
+                self.original,
+                (int(w * self.scale), int(h * self.scale)),
+                interpolation=cv2.INTER_AREA,
+            )
         self.scale = 1.0
         return self.original.copy()
 
     def _scaled_corners(self) -> np.ndarray:
         return (self.corners * self.scale).astype(np.int32)
 
-    def _redraw(self):
+    def _render_canvas(self) -> np.ndarray:
         display = self.display_base.copy()
         scaled = self._scaled_corners()
 
-        # Grid lines
-        overlay_corners = self.corners.copy()
-        lines = _grid_overlay_lines(overlay_corners)
-        for (p1, p2) in lines:
+        for (p1, p2) in _grid_overlay_lines(self.corners):
             sp1 = (int(p1[0] * self.scale), int(p1[1] * self.scale))
             sp2 = (int(p2[0] * self.scale), int(p2[1] * self.scale))
             cv2.line(display, sp1, sp2, (0, 255, 0), 1)
 
-        # Corner handles
         for i, (cx, cy) in enumerate(scaled):
             color = (0, 255, 255) if i == self.dragging else (0, 255, 0)
             cv2.circle(display, (cx, cy), 10, color, -1)
@@ -403,11 +434,41 @@ class GridFitUI:
             cv2.putText(display, self.CORNER_LABELS[i], (cx + 14, cy - 10),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
 
-        # Status
-        cv2.putText(display, "Drag corners | Enter=confirm | R=reset | Q=quit",
-                    (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        title = self._title_text or "Drag corners"
+        cv2.putText(display, title, (10, 25),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 3)
+        cv2.putText(display, title, (10, 25),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 1)
 
-        cv2.imshow(self.window_name, display)
+        if not self._buttons:
+            return display
+
+        img_h, img_w = display.shape[:2]
+        strip = np.full((self.BUTTON_HEIGHT, img_w, 3), 30, dtype=np.uint8)
+        btn_w = img_w // len(self._buttons)
+        for i, (label, _action, color) in enumerate(self._buttons):
+            x1 = i * btn_w
+            x2 = (i + 1) * btn_w if i < len(self._buttons) - 1 else img_w
+            cv2.rectangle(strip, (x1 + 2, 4),
+                          (x2 - 2, self.BUTTON_HEIGHT - 4), color, -1)
+            text_size, _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
+            tx = x1 + (btn_w - text_size[0]) // 2
+            ty = (self.BUTTON_HEIGHT + text_size[1]) // 2
+            cv2.putText(strip, label, (tx, ty),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        return np.vstack([display, strip])
+
+    def _button_at(self, x: int, y: int) -> str | None:
+        if not self._buttons:
+            return None
+        img_h, img_w = self.display_base.shape[:2]
+        if y < img_h or y >= img_h + self.BUTTON_HEIGHT:
+            return None
+        btn_w = img_w // len(self._buttons)
+        idx = min(x // btn_w, len(self._buttons) - 1)
+        if idx < 0:
+            return None
+        return self._buttons[idx][1]
 
     def _find_nearest_corner(self, x: int, y: int) -> int:
         scaled = self._scaled_corners()
@@ -419,44 +480,142 @@ class GridFitUI:
 
     def _mouse_callback(self, event, x, y, flags, param):
         if event == cv2.EVENT_LBUTTONDOWN:
+            action = self._button_at(x, y)
+            if action is not None:
+                self._action = action
+                return
             idx = self._find_nearest_corner(x, y)
             if idx >= 0:
                 self.dragging = idx
 
         elif event == cv2.EVENT_MOUSEMOVE and self.dragging >= 0:
+            # Clamp mouse coords to the image region so a corner can
+            # never be dragged off the visible area (would otherwise be
+            # ungrabbable on the next pass).
+            img_h, img_w = self.display_base.shape[:2]
+            cx = max(0, min(img_w - 1, x))
+            cy = max(0, min(img_h - 1, y))
             self.corners[self.dragging] = np.array(
-                [x / self.scale, y / self.scale], dtype=np.float32
+                [cx / self.scale, cy / self.scale], dtype=np.float32
             )
-            self._redraw()
+            self._dirty = True
 
         elif event == cv2.EVENT_LBUTTONUP:
             self.dragging = -1
-            self._redraw()
+            self._dirty = True
+
+    # Enter spans ASCII CR/LF and Qt::Key_Return / Qt::Key_Enter, which
+    # OpenCV's Qt backend on Linux sometimes returns as the raw Qt code
+    # (where & 0xFF would mask down to 4 or 5 and miss the comparison).
+    ENTER_KEYS = (13, 10, 0x01000004, 0x01000005)
+
+    def _repaint_if_dirty(self) -> None:
+        if self._dirty:
+            cv2.imshow(self.window_name, self._render_canvas())
+            self._dirty = False
+
+    def open(self) -> None:
+        if self._opened:
+            return
+        cv2.namedWindow(self.window_name, cv2.WINDOW_AUTOSIZE)
+        cv2.setMouseCallback(self.window_name, self._mouse_callback)
+        self._dirty = True
+        self._repaint_if_dirty()
+        self._opened = True
+
+    def close(self) -> None:
+        if not self._opened:
+            return
+        # Qt can have already torn the window down (e.g. user closed the
+        # X window manually, or a previous error path ran). Don't let
+        # that mask the real exception we're cleaning up from.
+        try:
+            cv2.destroyWindow(self.window_name)
+            cv2.waitKey(1)
+        except cv2.error:
+            pass
+        finally:
+            self._opened = False
+            self._buttons = ()
+            self._title_text = ""
+
+    def pump_events(self, timeout_ms: int = 30) -> int:
+        self._repaint_if_dirty()
+        return cv2.waitKey(timeout_ms)
+
+    def reset_to_auto(self) -> None:
+        self.corners = self.auto_corners.copy()
+        self._dirty = True
+
+    def current_corners(self) -> np.ndarray:
+        return self.corners.copy()
+
+    # ── Click-driven driver (used by verify_corners.py) ──
+
+    def run_until_action(self, buttons=None, title: str = "") -> tuple[str, np.ndarray]:
+        """Show the window with a clickable button strip below the image.
+        Returns (action, corners) when the user clicks any button other
+        than Reset. Reset rebases corners to the seed in-place and keeps
+        the window open."""
+        self._buttons = tuple(buttons) if buttons is not None \
+            else self.DEFAULT_VERIFY_BUTTONS
+        self._title_text = title
+        self._action = None
+        self._dirty = True
+
+        cv2.namedWindow(self.window_name, cv2.WINDOW_AUTOSIZE)
+        cv2.setMouseCallback(self.window_name, self._mouse_callback)
+        self._opened = True
+
+        try:
+            while True:
+                self._repaint_if_dirty()
+                cv2.waitKey(30)
+                if self._action == "reset":
+                    self.corners = self.auto_corners.copy()
+                    self._dirty = True
+                    self._action = None
+                    continue
+                if self._action is not None:
+                    return self._action, self.corners.copy()
+        finally:
+            self.close()
+
+    # ── Key-driven driver (used by scan.py --interactive) ──
 
     def run(self) -> np.ndarray | None:
         """Open window, return confirmed corners (4x2 float32) or None."""
+        # namedWindow MUST precede setMouseCallback — Qt registers the
+        # window handle here and setMouseCallback looks it up by name.
+        self._buttons = ()
         cv2.namedWindow(self.window_name, cv2.WINDOW_AUTOSIZE)
         cv2.setMouseCallback(self.window_name, self._mouse_callback)
-        self._redraw()
+        self._dirty = True
+        self._opened = True
 
         print("Grid overlay shown. Drag corners to adjust.")
-        print("  Enter = confirm | R = reset | Q = quit")
+        print("  Enter (or Y) = confirm | R = reset | Q = quit")
 
-        while True:
-            key = cv2.waitKey(30) & 0xFF
-
-            if key == ord('q'):
-                cv2.destroyAllWindows()
-                return None
-
-            if key == ord('r'):
-                self.corners = self.auto_corners.copy()
-                self._redraw()
-                print("Reset to auto-detected corners.")
-
-            if key in (13, 10):
-                cv2.destroyAllWindows()
-                return self.corners.copy()
+        try:
+            while True:
+                self._repaint_if_dirty()
+                key = cv2.waitKey(30)
+                if key == -1:
+                    continue
+                masked = key & 0xFF
+                if masked == ord('q'):
+                    return None
+                if masked == ord('r'):
+                    self.corners = self.auto_corners.copy()
+                    self._dirty = True
+                    print("Reset to auto-detected corners.")
+                    continue
+                if key in self.ENTER_KEYS or masked in (13, 10) or masked == ord('y'):
+                    return self.corners.copy()
+                if 0 <= masked < 256:
+                    print(f"  (ignored key: raw={key}, masked={masked})")
+        finally:
+            self.close()
 
 
 # ── Main pipeline entry ─────────────────────────────────────────
