@@ -10,7 +10,7 @@ epochs: 100
 backbone: mobilenetv2     # mobilenetv2 | resnet18
 unfreeze_layers: -1       # -1 = all trainable, 0 = fully frozen,
                           #  N = unfreeze the last N blocks of `features`
-pool_size: 4              # AdaptiveAvgPool2d((P,P)) dim in the head.
+pool_size: 8              # AdaptiveAvgPool2d((P,P)) dim in the head.
                           # 1 = original GAP (destroys spatial info);
                           # 4 = preserves a 4x4 spatial grid (current).
 dropout: 0.3

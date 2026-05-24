@@ -4,6 +4,37 @@ What changed between training runs of `scripts/train_corners.py`,
 newest first. Each `run_NNN/` directory under `runs/` is a frozen
 snapshot of one experiment (config, weights, metrics, log).
 
+## run_011 -- remove some more boards and added color-only
+- after removing the worst boards (warped, lifesize and other) the loss improved on validation set
+- ran same set as 010
+
+## run_010 -- added color-only augmentation
+- labeled certain data that was already warped to be color only
+    - may be more stringent with this afterwards, right now only 5 are color-only
+- reran with PS -1, LR1e-4, ES 15
+
+## run_009 -- testing LR
+- 1e-5 and 25 LR and ES
+- worse than 008 but better tha 007
+
+## run_008 -- all unfrozen
+- much better validation loss than with 3 unfrozen
+
+## run_007 -- pool size 8
+- increased pool size dim to 8
+- reverted back to 15 early stopping, 1e-4 LR, and 3 unfrozen
+
+## run_006 -- kept long early stopping, went back to all unfrozen
+- lasting much longer.  Mean Error px is still high (650-750) and looks to be overfitting in the training loss
+- validation loss not changing much
+
+## run_005 -- longer early stopping
+- kept 3 unfrozen, lowered learning rate and increased early stopping
+- still ended very early on epoch 27
+
+## run_004 -- unfreeze layers
+- tried unfreezing only the last 3 layers.  Seemed to be worse learning and ended after 19
+
 ## run_003 -- architectural fixes
 - Fixed val letterboxing (was squishing non-square images, causing train/val distribution mismatch)
 - Changed head from AdaptiveAvgPool2d(1) to AdaptiveAvgPool2d((4,4)) -- global pooling destroyed spatial info needed for coordinate regression
