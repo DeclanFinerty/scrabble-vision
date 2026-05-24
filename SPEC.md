@@ -62,6 +62,34 @@ photo -> [grid detection] -> warped 900x900 board
 - Letter accuracy: 92/94 (97.9%)
 - Empty accuracy: 131/131 (100%)
 
+## Corner Detection Model
+
+A learned regressor replaces the heuristic `auto_detect_corners` for
+production use. The heuristic remains as a fallback for when the model
+is unavailable or produces low-confidence output.
+
+- Architecture: MobileNetV2 pretrained backbone (ImageNet weights)
+  with a regression head outputting 8 values -- 4 corner xy pairs,
+  normalized to [0, 1] relative to image dimensions.
+- Input: 224x224 RGB (resized from the raw board photo).
+- Loss: Smooth L1 against the normalized ground-truth corner pairs.
+- Target accuracy: <=0.5% mean normalized coordinate error per corner
+  on the held-out test split.
+
+### Training pipeline
+
+- Config-driven (`config.yaml`) so each experiment is reproducible
+  from a single file.
+- Each run writes to its own directory under `training/corner/runs/<run-id>/`
+  (config snapshot, checkpoints, metrics, sample predictions).
+- Augmentations are composed: rotation + color jitter + perspective
+  warp + random crop. Corner targets are transformed in lockstep with
+  the image.
+- Splits are by **physical board**, never by image. Multiple photos
+  of the same board must all land in the same split (train, val, or
+  test) to prevent leakage of board-specific cues. The split manifest
+  lives under `data/splits/`.
+
 ## Data pipeline (rebuild in progress)
 
 The data layout has been reset. See `data/README.md` for the current
@@ -153,16 +181,17 @@ need their input/output paths updated for the new `data/` layout.
 
 ## Known limitations / planned improvements
 
-- **Data pipeline rebuild in flight.** Old paths
-  (`data/raw_boards/`, `data/train/`, `data/real_tiles/`, `data/eval/`)
-  are gone. Scripts that consume them are temporarily broken until
-  they're pointed at the new `data/raw/boards/`, `data/annotations/`,
-  `data/extracted/tiles/`, and `data/splits/` layout.
-- **Corner detection failure mode.** Auto-detect can fail on busy
-  backgrounds or low-contrast surfaces; users currently fall back to
-  manual drag in the web UI or `--interactive` CLI. A keypoint-based
-  corner regressor (the motivation behind the data rebuild, including
-  `raw/racks/`) is the planned replacement.
+- **Corner detection training is the active focus.** Labeling
+  (`scripts/verify_corners.py`) and the training loop under
+  `training/corner/` are the current work. The tile classification
+  data pipeline rebuild is deferred until the corner regressor lands
+  -- the existing `models/tile_classifier.pt` continues to ship in the
+  meantime.
+- **Corner detection failure mode.** Heuristic auto-detect can fail on
+  busy backgrounds or low-contrast surfaces; the MobileNetV2 regressor
+  documented above is the planned replacement, with the heuristic
+  retained as a fallback. Until the model ships, users fall back to
+  manual drag in the web UI or `--interactive` CLI.
 - **Blank tiles.** They have no printed face, so they're excluded
   from training and counted as empty during eval. The web UI lets
   the user mark blanks post-scan; the model can't infer them.

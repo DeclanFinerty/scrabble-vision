@@ -117,6 +117,60 @@ scripts to point at the new `data/raw/boards/`,
   these scripts as out-of-date.
 - Update `retrain.bat` accordingly.
 
+## Corner detection training
+
+The corner regressor (MobileNetV2 + 8-value regression head -- see
+`SPEC.md` for the architecture) lives under `training/corner/`:
+
+```
+training/corner/
+  config.yaml         # default training config
+  configs/            # additional experiment configs (optional)
+  runs/<run-id>/      # per-run config snapshot, checkpoints, metrics
+  ...                 # model, dataset, train loop, eval modules
+```
+
+Running training:
+
+```bash
+uv run training/corner/train.py                      # use default config
+uv run training/corner/train.py --config path.yaml   # override config
+```
+
+Each invocation creates a fresh `runs/<run-id>/` directory and copies
+the resolved config into it. Don't mutate an existing run directory --
+start a new one.
+
+Config conventions:
+- `config.yaml` holds the canonical defaults; keep it minimal and
+  human-readable.
+- Experiment variants live as separate files under
+  `training/corner/configs/` and are loaded with `--config`.
+- Anything that affects the trained weights (augmentation params,
+  optimizer, split seed, epochs) must come from the config -- no
+  hidden defaults baked into the code.
+
+### Board-level split rule
+
+**Never split images of the same physical board across train and
+val/test.** A single board photographed from multiple angles is
+*one* unit for the purposes of splitting -- all its photos must land
+in the same split. Otherwise the model can memorize board-specific
+cues (the corkboard behind it, a chipped tile, the rack on the side)
+and the val/test numbers will overestimate generalization.
+
+The split is by *board id*, not by file. The manifest under
+`data/splits/` is authoritative; build new splits by grouping at the
+board level first, then partitioning groups.
+
+### HEIC images
+
+Phone photos in `data/raw/boards/` may be `.heic` / `.HEIC`. Always
+load board images through `src.image_io.load_board_image` (or check
+`is_board_image` for filtering) -- it handles HEIC via `pillow-heif`
+and returns OpenCV-format `np.ndarray`. Do not call `cv2.imread`
+directly on raw board paths.
+
 ## Don'ts
 - Don't recreate `data/raw_boards/` or `data/eval/` -- those are
   retired. New code reads from `data/raw/boards/` and
