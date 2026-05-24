@@ -10,6 +10,10 @@ venv/
 data/
 !data/README.md
 
+# Training run outputs (model weights, logs, predictions). Config
+# and CHANGELOG are tracked; per-run artifacts are not.
+training/corner/runs/
+
 # Debug outputs
 debug_*.jpg
 corners.npy

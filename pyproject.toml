@@ -17,4 +17,6 @@ dependencies = [
     "fastapi>=0.115.0",
     "uvicorn>=0.34.0",
     "python-multipart>=0.0.18",
+    "pyyaml>=6.0.3",
+    "matplotlib>=3.10.9",
 ]

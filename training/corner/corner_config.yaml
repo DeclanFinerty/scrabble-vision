@@ -1,0 +1,22 @@
+# Default training config for the corner regressor.
+# Each training run copies the resolved config into its run dir.
+
+# Optimiser
+lr: 1.0e-4
+batch_size: 8
+epochs: 100
+
+# Model
+backbone: mobilenetv2     # mobilenetv2 | resnet18
+unfreeze_layers: -1       # -1 = all trainable, 0 = fully frozen,
+                          #  N = unfreeze the last N blocks of `features`
+pool_size: 4              # AdaptiveAvgPool2d((P,P)) dim in the head.
+                          # 1 = original GAP (destroys spatial info);
+                          # 4 = preserves a 4x4 spatial grid (current).
+dropout: 0.3
+
+# Scheduling
+lr_patience: 7            # ReduceLROnPlateau patience (epochs)
+early_stop_patience: 15   # stop after N epochs with no val improvement
+
+seed: 42
