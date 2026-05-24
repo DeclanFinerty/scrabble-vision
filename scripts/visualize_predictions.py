@@ -216,14 +216,16 @@ def main():
     out_dir = run_dir / "predictions"
     out_dir.mkdir(exist_ok=True)
 
-    header = (f"{'image':<32} {'size':<12} {'mean':>8}  "
+    header = (f"{'image':<32} {'size':<12} {'mean':>8} {'%diag':>7}  "
               f"{'TL':>7} {'TR':>7} {'BR':>7} {'BL':>7}")
     print(header)
     print("-" * len(header))
 
     cells: list[np.ndarray] = []
     mean_errs: list[float] = []
+    mean_errs_pct: list[float] = []
     per_corner_acc = np.zeros(4, dtype=np.float64)
+    per_corner_acc_pct = np.zeros(4, dtype=np.float64)
     trace_emitted = False
 
     for fname in val_names:
@@ -253,11 +255,19 @@ def main():
 
         per_corner = np.linalg.norm(pred_px - gt_px, axis=1)
         mean = float(per_corner.mean())
+        # Diagonal-normalised error: a 50 px miss on a 4032 px image
+        # and a 50 px miss on a 1300 px image are dramatically
+        # different errors -- this metric makes them comparable.
+        diag = float(np.sqrt(w * w + h * h))
+        per_corner_pct = per_corner / diag
+        mean_pct = float(per_corner_pct.mean())
         mean_errs.append(mean)
+        mean_errs_pct.append(mean_pct)
         per_corner_acc += per_corner
+        per_corner_acc_pct += per_corner_pct
 
         size_str = f"{w}x{h}"
-        print(f"{fname:<32} {size_str:<12} {mean:7.2f}  "
+        print(f"{fname:<32} {size_str:<12} {mean:7.2f} {mean_pct * 100:6.2f}%  "
               f"{per_corner[0]:6.2f} {per_corner[1]:6.2f} "
               f"{per_corner[2]:6.2f} {per_corner[3]:6.2f}")
 
@@ -278,11 +288,19 @@ def main():
                 summary, [cv2.IMWRITE_JPEG_QUALITY, 92])
 
     per_corner_mean = per_corner_acc / len(cells)
+    per_corner_mean_pct = per_corner_acc_pct / len(cells)
     print("-" * len(header))
     print(f"{'mean over ' + str(len(cells)) + ' images':<32} "
-          f"{'':<12} {np.mean(mean_errs):7.2f}  "
+          f"{'':<12} {np.mean(mean_errs):7.2f} "
+          f"{np.mean(mean_errs_pct) * 100:6.2f}%  "
           f"{per_corner_mean[0]:6.2f} {per_corner_mean[1]:6.2f} "
           f"{per_corner_mean[2]:6.2f} {per_corner_mean[3]:6.2f}")
+    print(f"{'per-corner (% of diagonal)':<32} "
+          f"{'':<12} {'':>8} {'':>7}  "
+          f"{per_corner_mean_pct[0] * 100:6.2f} "
+          f"{per_corner_mean_pct[1] * 100:6.2f} "
+          f"{per_corner_mean_pct[2] * 100:6.2f} "
+          f"{per_corner_mean_pct[3] * 100:6.2f}")
     print(f"\nWrote {len(cells)} annotated images + summary to {out_dir}")
 
 

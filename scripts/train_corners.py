@@ -291,22 +291,36 @@ def evaluate(model: nn.Module, val_imgs: torch.Tensor,
              val_coords: torch.Tensor,
              val_meta: list[tuple[int, int, float, int, int]],
              device: torch.device, criterion: nn.Module
-             ) -> tuple[float, float, dict[str, float]]:
+             ) -> tuple[float, dict]:
+    """Returns (val_loss, metrics) where metrics contains both raw
+    pixel error and resolution-fair percentage error (fraction of
+    each image's diagonal). Normalising by diagonal lets a 50 px
+    miss on a 4032 px image be compared honestly against a 50 px
+    miss on a 1300 px image."""
     model.eval()
     with torch.no_grad():
         preds = model(val_imgs.to(device))
         loss = float(criterion(preds, val_coords.to(device)).item())
     preds_cpu = preds.cpu().numpy().reshape(-1, 4, 2)
     gt_cpu = val_coords.numpy().reshape(-1, 4, 2)
-    per_corner_errs = []
-    for p, g, (_w, _h, scale, pad_x, pad_y) in zip(preds_cpu, gt_cpu, val_meta):
+    per_image_px, per_image_pct = [], []
+    for p, g, (w, h, scale, pad_x, pad_y) in zip(preds_cpu, gt_cpu, val_meta):
         p_px = unletterbox_norm_to_orig_px(p.copy(), scale, pad_x, pad_y)
         g_px = unletterbox_norm_to_orig_px(g.copy(), scale, pad_x, pad_y)
-        per_corner_errs.append(np.linalg.norm(p_px - g_px, axis=1))
-    per_corner = np.mean(np.stack(per_corner_errs), axis=0)
-    mean_err = float(per_corner.mean())
-    by_name = {name: float(per_corner[i]) for i, name in enumerate(CORNER_NAMES)}
-    return loss, mean_err, by_name
+        err_px = np.linalg.norm(p_px - g_px, axis=1)
+        diag = float(np.sqrt(w * w + h * h))
+        per_image_px.append(err_px)
+        per_image_pct.append(err_px / diag)
+    per_corner_px = np.mean(np.stack(per_image_px), axis=0)
+    per_corner_pct = np.mean(np.stack(per_image_pct), axis=0)
+    return loss, {
+        "mean_corner_error_px": float(per_corner_px.mean()),
+        "mean_corner_error_pct": float(per_corner_pct.mean()),
+        "per_corner_error_px": {n: float(per_corner_px[i])
+                                for i, n in enumerate(CORNER_NAMES)},
+        "per_corner_error_pct": {n: float(per_corner_pct[i])
+                                 for i, n in enumerate(CORNER_NAMES)},
+    }
 
 
 # --- Plot --------------------------------------------------------
@@ -379,7 +393,8 @@ def train_one_run(config: dict, run_dir: Path) -> dict:
     criterion = nn.SmoothL1Loss()
 
     history = {"train_loss": [], "val_loss": [],
-               "mean_corner_err_px": [], "lr": []}
+               "mean_corner_err_px": [], "mean_corner_err_pct": [],
+               "lr": []}
     best_val = float("inf")
     best_epoch = 0
     best_metrics: dict = {}
@@ -400,20 +415,23 @@ def train_one_run(config: dict, run_dir: Path) -> dict:
             n_batches += 1
         train_loss = running / max(1, n_batches)
 
-        val_loss, mean_err, per_corner = evaluate(
+        val_loss, val_metrics = evaluate(
             model, val_imgs, val_coords, val_meta, device, criterion
         )
         scheduler.step(val_loss)
 
+        mean_err_px = val_metrics["mean_corner_error_px"]
+        mean_err_pct = val_metrics["mean_corner_error_pct"]
         lr_now = optimizer.param_groups[0]["lr"]
         history["train_loss"].append(train_loss)
         history["val_loss"].append(val_loss)
-        history["mean_corner_err_px"].append(mean_err)
+        history["mean_corner_err_px"].append(mean_err_px)
+        history["mean_corner_err_pct"].append(mean_err_pct)
         history["lr"].append(lr_now)
 
         print(f"epoch {epoch:3d}  train {train_loss:.5f}  val {val_loss:.5f}  "
-              f"mean_err {mean_err:6.2f}px  lr {lr_now:.2e}  "
-              f"({time.time() - t0:.1f}s)")
+              f"mean_err {mean_err_px:6.2f}px ({mean_err_pct * 100:5.2f}%)  "
+              f"lr {lr_now:.2e}  ({time.time() - t0:.1f}s)")
 
         if val_loss < best_val - 1e-7:
             best_val = val_loss
@@ -421,8 +439,7 @@ def train_one_run(config: dict, run_dir: Path) -> dict:
             best_metrics = {
                 "train_loss": train_loss,
                 "val_loss": val_loss,
-                "mean_corner_error_px": mean_err,
-                "per_corner_error_px": per_corner,
+                **val_metrics,
             }
             torch.save(model.state_dict(), run_dir / "best_model.pt")
             since_improve = 0
@@ -449,10 +466,12 @@ def train_one_run(config: dict, run_dir: Path) -> dict:
     print(f"Best epoch:           {best_epoch} / {len(history['train_loss'])}")
     print(f"Best val loss:        {best_val:.5f}")
     print(f"Train loss at best:   {best_metrics['train_loss']:.5f}")
-    print(f"Mean corner error:    {best_metrics['mean_corner_error_px']:.2f} px "
-          f"(at each image's original resolution)")
-    for name, err in best_metrics["per_corner_error_px"].items():
-        print(f"  {name}: {err:6.2f} px")
+    print(f"Mean corner error:    {best_metrics['mean_corner_error_px']:.2f} px  "
+          f"({best_metrics['mean_corner_error_pct'] * 100:.2f}% of image diagonal)")
+    for name in CORNER_NAMES:
+        px = best_metrics["per_corner_error_px"][name]
+        pct = best_metrics["per_corner_error_pct"][name]
+        print(f"  {name}: {px:7.2f} px  ({pct * 100:5.2f}%)")
     print(f"Run dir:              {run_dir}")
     return metrics
 
