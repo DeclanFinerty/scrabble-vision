@@ -9,6 +9,9 @@ unique across data/raw/boards/) and holds:
                       (board won't appear in either labeling stage)
   - tile_label_skipped: True if a human chose not to label tiles
                         for this board (corners can still be useful)
+  - augment_level: "full" (rotation + perspective + crop + color)
+                   or "color_only" (just color jitter, no spatial
+                   transforms). Defaults to "full" for back-compat.
 
 Older entries in corners.json may be bare arrays (or null) from before
 the verification flags existed. `load()` migrates them in memory.
@@ -21,12 +24,16 @@ from typing import TypedDict
 
 CORNERS_FILE = Path("data/annotations/corners.json")
 
+AUGMENT_LEVELS = ("full", "color_only")
+DEFAULT_AUGMENT_LEVEL = "full"
+
 
 class CornerEntry(TypedDict):
     corners: list[list[float]] | None
     corners_verified: bool
     corners_rejected: bool
     tile_label_skipped: bool
+    augment_level: str
 
 
 def empty_entry() -> CornerEntry:
@@ -35,6 +42,7 @@ def empty_entry() -> CornerEntry:
         "corners_verified": False,
         "corners_rejected": False,
         "tile_label_skipped": False,
+        "augment_level": DEFAULT_AUGMENT_LEVEL,
     }
 
 
@@ -45,12 +53,17 @@ def _normalize(value) -> CornerEntry:
             "corners_verified": False,
             "corners_rejected": False,
             "tile_label_skipped": False,
+            "augment_level": DEFAULT_AUGMENT_LEVEL,
         }
+    level = value.get("augment_level", DEFAULT_AUGMENT_LEVEL)
+    if level not in AUGMENT_LEVELS:
+        level = DEFAULT_AUGMENT_LEVEL
     return {
         "corners": value.get("corners"),
         "corners_verified": bool(value.get("corners_verified", False)),
         "corners_rejected": bool(value.get("corners_rejected", False)),
         "tile_label_skipped": bool(value.get("tile_label_skipped", False)),
+        "augment_level": level,
     }
 
 

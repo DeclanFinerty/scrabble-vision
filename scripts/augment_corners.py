@@ -294,6 +294,52 @@ def resize_original(image: np.ndarray,
     return resized, corners_final
 
 
+def letterbox_matrix(orig_size: tuple[int, int],
+                     out_size: int) -> tuple[np.ndarray, int, int]:
+    """Aspect-preserving resize to (out_size, out_size) with black
+    padding. Returns (3x3 homography, pad_x, pad_y) so callers can
+    feed both image and corner points through the same matrix."""
+    w, h = orig_size
+    scale = out_size / max(h, w)
+    new_w = max(1, int(round(w * scale)))
+    new_h = max(1, int(round(h * scale)))
+    pad_x = (out_size - new_w) // 2
+    pad_y = (out_size - new_h) // 2
+    M = np.array([
+        [scale, 0.0,   float(pad_x)],
+        [0.0,   scale, float(pad_y)],
+        [0.0,   0.0,   1.0],
+    ], dtype=np.float64)
+    return M, pad_x, pad_y
+
+
+def letterbox_original(image: np.ndarray, corners_src: np.ndarray
+                       ) -> tuple[np.ndarray, np.ndarray]:
+    """Aspect-preserving 224x224 version of the source image. Used
+    for color_only entries so train and val share the same letterbox
+    pipeline and the model never sees a stretched board."""
+    h, w = image.shape[:2]
+    M, _, _ = letterbox_matrix((w, h), TARGET_SIZE)
+    resized = cv2.warpPerspective(
+        image, M, (TARGET_SIZE, TARGET_SIZE),
+        flags=cv2.INTER_AREA,
+        borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0),
+    )
+    corners_final = apply_h(M, corners_src)
+    round_trip_check(M, corners_src, corners_final, ROUND_TRIP_TOL)
+    return resized, corners_final
+
+
+def color_only_one(image: np.ndarray, corners_src: np.ndarray,
+                   rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray]:
+    """Color jitter only -- no rotation, perspective, or crop.
+    Image is letterboxed to TARGET_SIZE so the corners stay anchored
+    to the same physical board features and the aspect ratio matches
+    the val/inference pipeline."""
+    letterboxed, corners_final = letterbox_original(image, corners_src)
+    return color_jitter(letterboxed, rng), corners_final
+
+
 def manifest_row(path: Path, corners_224: np.ndarray, source: str) -> list:
     norm = corners_224 / TARGET_SIZE
     return [
@@ -329,6 +375,7 @@ def main():
 
     rows: list[list] = []
     n_orig = n_aug = 0
+    n_full_sources = n_color_sources = 0
     skipped: list[str] = []
 
     for i, fname in enumerate(train_names, start=1):
@@ -356,8 +403,17 @@ def main():
                               np.array(entry["corners"], dtype=np.float64))
 
         stem = Path(fname).stem
+        level = entry["augment_level"]
 
-        orig_img, orig_corners = resize_original(image, corners_src)
+        if level == "color_only":
+            orig_img, orig_corners = letterbox_original(image, corners_src)
+            aug_fn = color_only_one
+            n_color_sources += 1
+        else:
+            orig_img, orig_corners = resize_original(image, corners_src)
+            aug_fn = augment_one
+            n_full_sources += 1
+
         orig_path = OUT_IMG_DIR / f"{stem}_orig.jpg"
         cv2.imwrite(str(orig_path), orig_img,
                     [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
@@ -365,14 +421,15 @@ def main():
         n_orig += 1
 
         for k in range(args.count):
-            aug_img, aug_corners = augment_one(image, corners_src, rng)
+            aug_img, aug_corners = aug_fn(image, corners_src, rng)
             out_path = OUT_IMG_DIR / f"{stem}_{k:03d}.jpg"
             cv2.imwrite(str(out_path), aug_img,
                         [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
             rows.append(manifest_row(out_path, aug_corners, fname))
             n_aug += 1
 
-        print(f"[{i}/{len(train_names)}] {fname}: 1 orig + {args.count} aug")
+        print(f"[{i}/{len(train_names)}] {fname}: 1 orig + {args.count} aug "
+              f"({level})")
 
     with OUT_MANIFEST.open("w", newline="") as f:
         writer = csv.writer(f)
@@ -381,10 +438,12 @@ def main():
 
     print()
     print(f"Wrote {len(rows)} rows to {OUT_MANIFEST}")
-    print(f"  Originals:    {n_orig}")
-    print(f"  Augmented:    {n_aug}")
+    print(f"  Source images:    {n_full_sources + n_color_sources}  "
+          f"(full={n_full_sources}, color_only={n_color_sources})")
+    print(f"  Originals:        {n_orig}")
+    print(f"  Augmented:        {n_aug}")
     if skipped:
-        print(f"  Skipped:      {len(skipped)}")
+        print(f"  Skipped:          {len(skipped)}")
         for s in skipped:
             print(f"    {s}")
 
