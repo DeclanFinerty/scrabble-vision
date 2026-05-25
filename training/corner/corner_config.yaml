@@ -3,14 +3,14 @@
 
 # Optimiser
 lr: 1.0e-4
-batch_size: 8
+batch_size: 4
 epochs: 100
 
 # Model
 backbone: mobilenetv2     # mobilenetv2 | resnet18
 unfreeze_layers: -1       # -1 = all trainable, 0 = fully frozen,
                           #  N = unfreeze the last N blocks of `features`
-pool_size: 8              # AdaptiveAvgPool2d((P,P)) dim in the head.
+pool_size: 7              # AdaptiveAvgPool2d((P,P)) dim in the head.
                           # 1 = original GAP (destroys spatial info);
                           # 4 = preserves a 4x4 spatial grid (current).
 dropout: 0.3

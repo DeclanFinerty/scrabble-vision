@@ -30,6 +30,27 @@ The Windows batch files (`retrain.bat`, `start_mobile.bat`) are
 convenience wrappers; the `uv run ...` lines inside them work on any
 OS.
 
+## Pipeline scripts
+
+`scripts/README.md` is the canonical reference for the corner-
+detection pipeline -- what each script does, what it reads/writes,
+and the order to run them in for new data. The high-level flow:
+
+```
+import_coco_dataset.py / rename_coco_files.py   # intake
+  -> batch_detect_corners.py                    # auto-seed (optional)
+  -> verify_corners.py                          # human review
+  -> label_boards.py                            # group by physical board
+  -> set_augment_level.py                       # full vs color_only
+  -> make_splits.py                             # train/val/test
+  -> augment_corners.py                         # build augmented set
+  -> train_corners.py                           # train -> runs/run_NNN
+  -> visualize_predictions.py                   # eyeball predictions
+```
+
+When you add a script to `scripts/`, update `scripts/README.md` at
+the same commit so this reference doesn't rot.
+
 ## Tests
 There is no automated test suite. Validation is manual:
 - Run `evaluate.py` after any change that touches detection or the

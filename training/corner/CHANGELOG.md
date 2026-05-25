@@ -4,6 +4,25 @@ What changed between training runs of `scripts/train_corners.py`,
 newest first. Each `run_NNN/` directory under `runs/` is a frozen
 snapshot of one experiment (config, weights, metrics, log).
 
+# run_016 -- testing batch sizes
+- run batch size 4 with 40 augementation each first
+- error trajectory was more noisy
+
+## run_015 -- doubled augmentation to 40 each
+- best accuracy on validation was 2.7%
+
+## run_014 -- updated data
+- added two large datasets
+- changed augmentation to 20 each, got below 5% error
+
+## run_013 -- trimmed validation and poolsize
+- removed unique boards from validation, only grammy's board shots
+- fixed poolsize to 7 because of mobilenet 7x7
+
+## run_012 -- added new dataset
+- added scrabble_dataset2
+- same config as 011 and 010, slightly better but validation unique values had changed
+
 ## run_011 -- remove some more boards and added color-only
 - after removing the worst boards (warped, lifesize and other) the loss improved on validation set
 - ran same set as 010
