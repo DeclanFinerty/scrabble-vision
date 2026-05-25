@@ -65,30 +65,92 @@ photo -> [grid detection] -> warped 900x900 board
 ## Corner Detection Model
 
 A learned regressor replaces the heuristic `auto_detect_corners` for
-production use. The heuristic remains as a fallback for when the model
-is unavailable or produces low-confidence output.
+production use. The heuristic remains as a fallback for when the
+model is unavailable or produces low-confidence output.
 
-- Architecture: MobileNetV2 pretrained backbone (ImageNet weights)
-  with a regression head outputting 8 values -- 4 corner xy pairs,
-  normalized to [0, 1] relative to image dimensions.
-- Input: 224x224 RGB (resized from the raw board photo).
-- Loss: Smooth L1 against the normalized ground-truth corner pairs.
-- Target accuracy: <=0.5% mean normalized coordinate error per corner
-  on the held-out test split.
+### Architecture (`CornerRegressor` in `scripts/train_corners.py`)
+
+- Backbone: MobileNetV2 pretrained on ImageNet (ResNet18 also
+  supported via the `backbone` config field). `freeze_backbone` is
+  superseded by `unfreeze_layers`: `-1` for fully trainable, `0`
+  for fully frozen, `N > 0` to unfreeze just the last N children of
+  `features`. Frozen BatchNorm modules are forced to eval mode so
+  their running stats don't drift when only the head trains.
+- Regression head: `AdaptiveAvgPool2d((P, P))` → `Flatten` →
+  `Linear(feat_dim * P*P, 256)` → ReLU → Dropout → `Linear(256, 8)`.
+  `P` (`pool_size` in the config) defaults to 7 to match MobileNetV2's
+  native 7x7 final feature map (no spatial pooling loss); was 4 in
+  earlier runs and 1 (GAP) destroyed positional info so the model
+  could only learn average corner positions.
+- Output: 8 floats, interpreted as 4 (x, y) pairs in TL/TR/BR/BL
+  order, normalised to `[0, 1]` of the letterboxed 224x224 input.
+  Values can fall outside `[0, 1]` (the loss accepts this) when
+  augmentation crops a corner out of frame.
+
+### Input + eval preprocessing
+
+- Each image is **letterboxed** to 224x224 (aspect-preserving resize
+  + black-bar padding), then ImageNet-normalised. Letterbox params
+  (`scale`, `pad_x`, `pad_y`) round-trip exactly: any normalised
+  prediction can be denormalised back to original-image pixel coords.
+- Val images go through the same letterbox -- no augmentation -- so
+  train and val see the same aspect-ratio convention. Train images
+  come pre-augmented from `data/augmented/corner_train/`.
+
+### Loss + metrics
+
+- `SmoothL1Loss` on normalised coordinates. Unchanged across runs.
+- Eval reports pixel error AND `% of image diagonal` per image, then
+  averaged. Diagonal-normalised error is resolution-fair across val
+  images of different sizes (a 50 px miss on 4032 px vs on 1300 px
+  reads very differently in raw pixels). See `evaluate()` in
+  `scripts/train_corners.py`.
+- Best result so far: 2.7% mean val error (run_015 -- see
+  `training/corner/CHANGELOG.md` for the per-run history). Target
+  is sub-1%.
 
 ### Training pipeline
 
-- Config-driven (`config.yaml`) so each experiment is reproducible
-  from a single file.
-- Each run writes to its own directory under `training/corner/runs/<run-id>/`
-  (config snapshot, checkpoints, metrics, sample predictions).
-- Augmentations are composed: rotation + color jitter + perspective
-  warp + random crop. Corner targets are transformed in lockstep with
-  the image.
-- Splits are by **physical board**, never by image. Multiple photos
-  of the same board must all land in the same split (train, val, or
-  test) to prevent leakage of board-specific cues. The split manifest
-  lives under `data/splits/`.
+- Config-driven (`training/corner/corner_config.yaml`); pass a
+  different YAML with `--config <path>`. Each `train_corners.py`
+  invocation auto-creates `training/corner/runs/run_NNN/` with a
+  config snapshot, `best_model.pt`, `metrics.json` (best epoch +
+  full per-epoch history, both px and % units), `loss_curve.png`,
+  and `log.txt`.
+- Optimiser: Adam. Scheduler: `ReduceLROnPlateau` on val loss with
+  `factor=0.5`, `patience=lr_patience`. Early-stop on val loss with
+  `patience=early_stop_patience`.
+- Splits are by **physical board** via `data/annotations/board_groups.json`
+  (see `scripts/label_boards.py` + `scripts/make_splits.py`). Multiple
+  photos of the same board must all land in the same split so the
+  model can't memorise board-specific cues.
+- Augmentation is **per-image**, controlled by the `augment_level`
+  field in `corners.json`:
+  - `full` (default): rotation (0-360 deg) + perspective warp
+    (~5% corner perturbation) + random square crop (>=60% board
+    area, >=2 corners in-frame) + color jitter, composed as a single
+    homography with a round-trip math check per sample.
+  - `color_only`: just brightness/contrast/saturation/hue on the
+    letterboxed source, for boards where rotation augmentation would
+    produce nonsense (e.g. badges, oriented text). Set via
+    `scripts/set_augment_level.py`.
+
+### Verification UI (`scripts/verify_corners.py`)
+
+- Standard single-image + `--batch` flows iterate one image at a
+  time through `GridFitUI`.
+- `--group-mode` iterates by board group. For multi-image groups it
+  verifies the first unlabeled image then prompts `y/n/r` to apply
+  the same corners + image flips to the rest of the group.
+- The UI button strip includes Verify / Rotate / FlipH / FlipV /
+  Reset / Skip / Reject / Quit. Rotate cycles the corner array one
+  slot CW (relabel when the keypoint exporter put corners in the
+  wrong rotation). FlipH / FlipV mirror the image **and** remap
+  corners; on Verify the flipped image is persisted to disk and the
+  un-flipped original is preserved at `<dataset>/original/<name>`.
+
+See `scripts/README.md` for the full pipeline order from new
+Roboflow dataset to a trained run.
 
 ## Data pipeline (rebuild in progress)
 
@@ -182,16 +244,24 @@ need their input/output paths updated for the new `data/` layout.
 ## Known limitations / planned improvements
 
 - **Corner detection training is the active focus.** Labeling
-  (`scripts/verify_corners.py`) and the training loop under
-  `training/corner/` are the current work. The tile classification
-  data pipeline rebuild is deferred until the corner regressor lands
-  -- the existing `models/tile_classifier.pt` continues to ship in the
-  meantime.
-- **Corner detection failure mode.** Heuristic auto-detect can fail on
-  busy backgrounds or low-contrast surfaces; the MobileNetV2 regressor
-  documented above is the planned replacement, with the heuristic
-  retained as a fallback. Until the model ships, users fall back to
-  manual drag in the web UI or `--interactive` CLI.
+  (`scripts/verify_corners.py` -- supports group-mode propagation,
+  flip H/V with backups to `<dataset>/original/`, and label rotation)
+  and the training loop driven by `scripts/train_corners.py` are
+  the day-to-day work. Best val error to date is 2.7% of image
+  diagonal (run_015); target is sub-1%. See
+  `training/corner/CHANGELOG.md` for per-run notes.
+- **Tile classification rebuild deferred.** The existing
+  `models/tile_classifier.pt` continues to ship; the
+  `extract_tiles.py` / `augment_tiles.py` / `train.py` /
+  `evaluate.py` / `server.py` / `web/index.html` entry points have
+  been moved into `ss/` (superseded) pending the corner work landing
+  first. References to them in the "Modules" + "Running end-to-end"
+  sections below document the legacy layout, not the current root.
+- **Corner detection failure mode.** Heuristic auto-detect can fail
+  on busy backgrounds or low-contrast surfaces; the trained
+  regressor is the planned replacement, with the heuristic retained
+  as a fallback. Until the regressor ships, users fall back to
+  manual drag in the (legacy) web UI or `--interactive` CLI.
 - **Blank tiles.** They have no printed face, so they're excluded
   from training and counted as empty during eval. The web UI lets
   the user mark blanks post-scan; the model can't infer them.

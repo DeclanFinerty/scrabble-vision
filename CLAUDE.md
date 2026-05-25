@@ -20,15 +20,17 @@ day-to-day conventions for contributing.
 
 ```bash
 uv sync                                                # install deps
-uv run scan.py --image board.jpg --interactive         # CLI scan
-uv run uvicorn server:app --host 0.0.0.0 --port 8001   # web UI
-uv run evaluate.py                                     # batch eval
-uv run train.py                                        # retrain
 ```
 
-The Windows batch files (`retrain.bat`, `start_mobile.bat`) are
-convenience wrappers; the `uv run ...` lines inside them work on any
-OS.
+The active corner-detection pipeline lives under `scripts/`; see
+`scripts/README.md` for the full per-stage tour (intake -> labeling
+-> training-set build -> train -> evaluate). The legacy tile-
+classification + web-UI entry points (`scan.py`, `server.py`,
+`evaluate.py`, `train.py`, `extract_tiles.py`, `web/index.html`,
+`retrain.bat`, `start_mobile.bat`) have been moved to `ss/`
+(superseded) while the corner regressor lands; the shipped
+`models/tile_classifier.pt` is still used by anything that pulls
+the tile classifier directly.
 
 ## Pipeline scripts
 
@@ -53,12 +55,18 @@ the same commit so this reference doesn't rot.
 
 ## Tests
 There is no automated test suite. Validation is manual:
-- Run `evaluate.py` after any change that touches detection or the
-  model -- the held-out board should stay at 99.1% cell accuracy.
-- For web/server changes, drive `web/index.html` against a phone (or
-  desktop browser with a fake camera) and exercise the
-  scan -> corner-adjust -> edit -> save flow end to end. Type checks
-  alone do not verify feature correctness.
+- For corner regressor changes, run `scripts/train_corners.py`
+  (a short epoch budget is fine for smoke-testing the pipeline)
+  and then `scripts/visualize_predictions.py training/corner/runs/run_NNN`
+  to eyeball whether the predicted corners land on the right
+  physical board corners across the val set.
+- For augmentation changes, `scripts/sanity_check_corners.py`
+  draws the manifest's normalized coords onto a sample of augmented
+  images and reports min/max coord ranges; catches labeling math
+  bugs before they silently train a bad model.
+- Legacy: tile-classifier validation was via `ss/evaluate.py`
+  against held-out boards; revisit when the tile pipeline rebuild
+  resumes.
 
 When you add code that has natural unit boundaries (e.g. pure
 functions in `grid_detect.py`), tests are welcome but not required.
@@ -140,36 +148,43 @@ scripts to point at the new `data/raw/boards/`,
 
 ## Corner detection training
 
-The corner regressor (MobileNetV2 + 8-value regression head -- see
-`SPEC.md` for the architecture) lives under `training/corner/`:
+The corner regressor (MobileNetV2 backbone + spatial-pool regression
+head -- see `SPEC.md` for the architecture) lives under
+`training/corner/`:
 
 ```
 training/corner/
-  config.yaml         # default training config
-  configs/            # additional experiment configs (optional)
-  runs/<run-id>/      # per-run config snapshot, checkpoints, metrics
-  ...                 # model, dataset, train loop, eval modules
+  corner_config.yaml  # default training config
+  CHANGELOG.md        # what changed between runs, newest first
+  runs/run_NNN/       # per-run config snapshot, weights, metrics,
+                      # predictions/  -- gitignored
 ```
 
-Running training:
+Running is via the top-level scripts (see `scripts/README.md` for
+the full pipeline reference):
 
 ```bash
-uv run training/corner/train.py                      # use default config
-uv run training/corner/train.py --config path.yaml   # override config
+uv run scripts/train_corners.py                                    # default config
+uv run scripts/train_corners.py --config path/to/some.yaml         # override
+uv run scripts/visualize_predictions.py training/corner/runs/run_NNN
 ```
 
-Each invocation creates a fresh `runs/<run-id>/` directory and copies
-the resolved config into it. Don't mutate an existing run directory --
+Each `train_corners.py` invocation creates a fresh
+`training/corner/runs/run_NNN/` (auto-incremented) and copies the
+resolved config into it. Don't mutate an existing run directory --
 start a new one.
 
 Config conventions:
-- `config.yaml` holds the canonical defaults; keep it minimal and
-  human-readable.
-- Experiment variants live as separate files under
-  `training/corner/configs/` and are loaded with `--config`.
+- `corner_config.yaml` holds the canonical defaults; keep it minimal
+  and human-readable.
+- Experiment variants are separate YAML files (anywhere on disk),
+  passed with `--config <path>`.
 - Anything that affects the trained weights (augmentation params,
-  optimizer, split seed, epochs) must come from the config -- no
-  hidden defaults baked into the code.
+  optimizer, split seed, epochs, pool_size, unfreeze_layers) must
+  come from the config -- no hidden defaults baked into the code.
+- After every meaningful run, append a `## run_NNN -- <title>` entry
+  to `training/corner/CHANGELOG.md` explaining what changed and what
+  the result was. Newest entries at the top.
 
 ### Board-level split rule
 
