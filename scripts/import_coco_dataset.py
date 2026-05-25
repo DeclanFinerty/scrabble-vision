@@ -1,13 +1,18 @@
 """
-Import a COCO-format dataset of board images with CORNER bbox
-annotations.
+Import a COCO-format dataset of board images with corner annotations.
+
+Two annotation shapes are auto-detected:
+  - Roboflow "object detection" task with a `CORNER` category
+    contributing 4 small bboxes per image (one per corner).
+  - Roboflow "keypoint detection" task with one annotation per
+    image whose `keypoints` array holds 4 (x, y, visibility) triples.
 
 Two side effects on the dataset folder:
   1. Each image is renamed in place to its `extra.name` (the short
      human-friendly name from the COCO record), and the COCO json is
      rewritten so `file_name` matches.
-  2. For every board with 4 CORNER bboxes, the bbox centers are
-     ordered TL/TR/BR/BL and merged into
+  2. For every image with 4 visible corner points, the corners are
+     ordered TL/TR/BR/BL via order_corners and merged into
      data/annotations/corners.json (keyed by the new short
      filename), so the labeling tool can use them as seeds.
 
@@ -18,6 +23,8 @@ passed.
 Usage:
     uv run scripts/import_coco_dataset.py \\
         --coco data/raw/boards/scrabble-dataset_1/_annotations.coco.json
+    uv run scripts/import_coco_dataset.py \\
+        --coco data/raw/boards/scrabble-dataset_3/_annotations.coco.json
 """
 
 import argparse
@@ -42,6 +49,53 @@ def bbox_center(bbox: list[float]) -> list[float]:
     return [x + w / 2.0, y + h / 2.0]
 
 
+def extract_corners_by_image(coco: dict
+                             ) -> tuple[dict[int, list[list[float]]], str | None]:
+    """Pull corner points out of a COCO json. Auto-detects two
+    Roboflow export shapes:
+
+      1. "CORNER" category with 4 small bboxes per image (one per
+         corner). Used by Roboflow's object-detection task.
+      2. COCO keypoints: one annotation per image whose `keypoints`
+         array holds 4 (x, y, visibility) triples. Used by
+         Roboflow's keypoint-detection task.
+
+    Returns (corners_by_image_id, format_name). Empty + None if
+    neither shape is present in the file."""
+    # Format 1: CORNER bboxes.
+    corner_cat_ids = {c["id"] for c in coco["categories"]
+                      if c["name"] == CORNER_CATEGORY}
+    if corner_cat_ids:
+        out: dict[int, list[list[float]]] = {}
+        for ann in coco["annotations"]:
+            if ann["category_id"] not in corner_cat_ids:
+                continue
+            out.setdefault(ann["image_id"], []).append(bbox_center(ann["bbox"]))
+        return out, f"{CORNER_CATEGORY} bboxes"
+
+    # Format 2: COCO keypoints. Visibility 0 means "not labeled" --
+    # we skip those triples so partially-labeled images surface in
+    # the incomplete report instead of getting silently bad corners.
+    saw_keypoints = False
+    out = {}
+    for ann in coco["annotations"]:
+        kp = ann.get("keypoints") or []
+        if len(kp) < 12:
+            continue
+        saw_keypoints = True
+        pts = []
+        for i in range(4):
+            x, y, v = kp[i * 3], kp[i * 3 + 1], kp[i * 3 + 2]
+            if v == 0:
+                continue
+            pts.append([float(x), float(y)])
+        if pts:
+            out.setdefault(ann["image_id"], []).extend(pts)
+    if saw_keypoints:
+        return out, "keypoints"
+    return {}, None
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[1])
     parser.add_argument("--coco", required=True, type=Path,
@@ -58,17 +112,14 @@ def main():
     coco = json.loads(args.coco.read_text())
     img_dir = args.coco.parent
 
-    corner_cat_ids = {c["id"] for c in coco["categories"]
-                      if c["name"] == CORNER_CATEGORY}
-    if not corner_cat_ids:
-        print(f"No '{CORNER_CATEGORY}' category in {args.coco}")
+    corners_by_image, fmt = extract_corners_by_image(coco)
+    if fmt is None:
+        print(f"No usable corner annotations found in {args.coco}.")
+        print(f"Expected one of:")
+        print(f"  - a '{CORNER_CATEGORY}' category with one bbox per corner, or")
+        print(f"  - keypoint annotations with 4 (x, y, visibility) triples")
         sys.exit(1)
-
-    corners_by_image: dict[int, list[list[float]]] = {}
-    for ann in coco["annotations"]:
-        if ann["category_id"] not in corner_cat_ids:
-            continue
-        corners_by_image.setdefault(ann["image_id"], []).append(ann["bbox"])
+    print(f"Annotation format: {fmt}")
 
     renamed = already = skipped = 0
     new_corners: dict[str, list[list[float]]] = {}
@@ -104,13 +155,13 @@ def main():
         else:
             already += 1
 
-        bboxes = corners_by_image.get(img["id"], [])
-        if len(bboxes) == 4:
-            pts = np.array([bbox_center(b) for b in bboxes], dtype=np.float32)
+        pts_list = corners_by_image.get(img["id"], [])
+        if len(pts_list) == 4:
+            pts = np.array(pts_list, dtype=np.float32)
             ordered = order_corners(pts)
             new_corners[new_name] = ordered.tolist()
         else:
-            incomplete.append((new_name, len(bboxes)))
+            incomplete.append((new_name, len(pts_list)))
 
     args.coco.write_text(json.dumps(coco, indent=2))
 
