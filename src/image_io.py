@@ -47,3 +47,18 @@ def _load_via_pillow(path: Path) -> np.ndarray | None:
     except Exception:
         return None
     return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+
+
+def save_board_image(path: Path, image_bgr: np.ndarray) -> None:
+    """Write a BGR uint8 image back to disk, preserving the file's
+    extension. JPEG/PNG go through cv2.imwrite; HEIC goes through
+    Pillow + pillow-heif (which registers a heif writer alongside
+    the opener)."""
+    ext = path.suffix.lower()
+    if ext in (".heic", ".heif"):
+        rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+        Image.fromarray(rgb).save(str(path))
+        return
+    ok = cv2.imwrite(str(path), image_bgr)
+    if not ok:
+        raise RuntimeError(f"cv2.imwrite failed for {path}")

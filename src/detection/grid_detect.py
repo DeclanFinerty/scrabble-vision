@@ -364,6 +364,9 @@ class GridFitUI:
     DEFAULT_MAX_DISPLAY = 800
     DEFAULT_VERIFY_BUTTONS = (
         ("Verify", "verify", (60, 160, 60)),
+        ("Rotate", "rotate", (40, 180, 220)),
+        ("FlipH",  "flip_h", (180, 100, 180)),
+        ("FlipV",  "flip_v", (100, 180, 180)),
         ("Reset",  "reset",  (40, 140, 200)),
         ("Skip",   "skip",   (140, 140, 140)),
         ("Reject", "reject", (50, 50, 200)),
@@ -373,7 +376,8 @@ class GridFitUI:
     def __init__(self, image: np.ndarray,
                  initial_corners: np.ndarray = None,
                  max_display: int = DEFAULT_MAX_DISPLAY):
-        self.original = image
+        self._input_image = image     # never modified -- used by Reset
+        self.original = image         # working image; Flip H/V mutates this
         self.max_display = max_display
         self.scale = 1.0
         self.display_base = self._compute_display()
@@ -383,9 +387,22 @@ class GridFitUI:
         self._buttons: tuple = ()  # (label, action, bgr) tuples
         self._title_text = ""
         self._action: str | None = None
+        # Flip parity vs the un-modified input image. Two flips of
+        # the same axis cancel; the caller saves only when at least
+        # one is True at verify time.
+        self._h_flipped = False
+        self._v_flipped = False
 
         if initial_corners is not None:
-            self.corners = order_corners(initial_corners).copy()
+            # Trust the caller's order. Re-running order_corners()
+            # here would discard any rotation the user previously
+            # applied (and saved to corners.json) by re-sorting the
+            # array back into image-position order. Callers that
+            # need normalisation (auto_detect_corners output, COCO
+            # bbox import) should run order_corners themselves
+            # before passing in.
+            self.corners = np.asarray(initial_corners,
+                                      dtype=np.float32).copy()
         else:
             h, w = image.shape[:2]
             self.corners = np.array([
@@ -572,14 +589,71 @@ class GridFitUI:
                 self._repaint_if_dirty()
                 cv2.waitKey(30)
                 if self._action == "reset":
+                    # Restore everything to the unmodified input.
+                    self.original = self._input_image
+                    self._h_flipped = False
+                    self._v_flipped = False
+                    self.display_base = self._compute_display()
                     self.corners = self.auto_corners.copy()
                     self._dirty = True
+                    self._action = None
+                    continue
+                if self._action == "rotate":
+                    # Cycle labels one slot clockwise: the point that
+                    # had label TL is relabeled TR, the BL point
+                    # rotates in to become the new TL, etc. Repeat
+                    # 1-3 times to reach any of the 4 orientations.
+                    self.corners = self.corners[[3, 0, 1, 2]].copy()
+                    self._dirty = True
+                    self._action = None
+                    continue
+                if self._action == "flip_h":
+                    self._apply_flip_h()
+                    self._action = None
+                    continue
+                if self._action == "flip_v":
+                    self._apply_flip_v()
                     self._action = None
                     continue
                 if self._action is not None:
                     return self._action, self.corners.copy()
         finally:
             self.close()
+
+    # ── Flip helpers ──
+
+    def _apply_flip_h(self) -> None:
+        """Mirror image left/right; swap horizontal label pairs so the
+        array still reads [TL, TR, BR, BL] for the flipped image."""
+        h, w = self.original.shape[:2]
+        self.original = self.original[:, ::-1].copy()
+        new_corners = self.corners.copy()
+        new_corners[:, 0] = (w - 1) - new_corners[:, 0]
+        # In a horizontally-flipped image, the old TL pixel sits at
+        # the new TR position; same for BR <-> BL.
+        self.corners = new_corners[[1, 0, 3, 2]].copy()
+        self._h_flipped = not self._h_flipped
+        self.display_base = self._compute_display()
+        self._dirty = True
+
+    def _apply_flip_v(self) -> None:
+        h, w = self.original.shape[:2]
+        self.original = self.original[::-1, :].copy()
+        new_corners = self.corners.copy()
+        new_corners[:, 1] = (h - 1) - new_corners[:, 1]
+        # Vertical flip swaps TL<->BL and TR<->BR.
+        self.corners = new_corners[[3, 2, 1, 0]].copy()
+        self._v_flipped = not self._v_flipped
+        self.display_base = self._compute_display()
+        self._dirty = True
+
+    @property
+    def image_modified(self) -> bool:
+        return self._h_flipped or self._v_flipped
+
+    @property
+    def current_image(self) -> np.ndarray:
+        return self.original
 
     # ── Key-driven driver (used by scan.py --interactive) ──
 
