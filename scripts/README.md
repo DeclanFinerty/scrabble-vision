@@ -76,6 +76,14 @@ generated automatically by `train_corners.py`. The legacy
                             +--------------------------------+
                             |  visualize_predictions.py      |
                             |  per-val-image predictions     |
+                            |  predict_test.py               |
+                            |  per-test-image predictions    |
+                            +--------------------------------+
+                                         v
+                            +--------------------------------+
+                            |  clean_augmented.py            |
+                            |  reclaim disk space when done  |
+                            |  (train auto-cleans on success)|
                             +--------------------------------+
 ```
 
@@ -229,8 +237,9 @@ Evaluates per-epoch against `corner_val.txt` (letterboxed, no
 augmentation), and writes everything to an auto-incrementing
 `training/corner/runs/run_NNN/` directory:
 - `config.yaml` (snapshot of config used)
-- `augmented/corner_train/*.jpg` + `augmented/corner_manifest.csv`
-  (per-run training data)
+- `augmented/corner_manifest.csv` (per-run manifest, kept)
+- `augmented/corner_train/*.jpg` (per-run training data, deleted
+  after a successful run unless `--keep-augmented`)
 - `best_model.pt` (state_dict at best val epoch)
 - `metrics.json` (best-epoch + full per-epoch history, both px and
   % of image diagonal)
@@ -261,6 +270,31 @@ Reads: `<run_dir>/config.yaml`, `<run_dir>/best_model.pt`,
   `data/splits/corner_val.txt`, `data/annotations/corners.json`
 Writes: `<run_dir>/predictions/<stem>.jpg`,
   `<run_dir>/predictions/summary.jpg`
+
+### `predict_test.py`
+Same as `visualize_predictions.py` but operates on the **test**
+split. Writes to an auto-incrementing
+`<run_dir>/predictions_test_NN/` directory (so re-running never
+overwrites a previous test result), with one annotated JPEG per
+test image named `NNN_<stem>.jpg` plus `summary.jpg` and a
+`metrics.json` capturing per-image and per-corner error in both
+pixels and % of diagonal.
+
+Reads: `<run_dir>/config.yaml`, `<run_dir>/best_model.pt`,
+  `data/splits/corner_test.txt`, `data/annotations/corners.json`
+Writes: `<run_dir>/predictions_test_NN/`
+
+## Stage 6 — Cleanup
+
+### `clean_augmented.py`
+Deletes the augmented training JPEGs (`runs/run_NNN/augmented/corner_train/`)
+from one or more runs to reclaim disk space. Keeps the
+`corner_manifest.csv` so labels + filenames are still reproducible.
+`train_corners.py` runs this automatically on a successful training;
+use the standalone script for older runs or after `--keep-augmented`.
+
+Reads: `training/corner/runs/run_*/augmented/corner_train/`
+Writes: removes that directory (manifest CSV untouched)
 
 ## Quick-reference: order of script invocation for new data
 

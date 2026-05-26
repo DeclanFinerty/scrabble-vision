@@ -14,15 +14,19 @@ Writes (auto-incrementing) training/corner/runs/run_NNN/:
   metrics.json                best-epoch metrics + full per-epoch history
   loss_curve.png              train + val Smooth L1 loss per epoch
   log.txt                     stdout duplicate
-  augmented/corner_train/     per-run augmented JPEGs (gitignored with
-                              the rest of runs/)
+  augmented/corner_train/     per-run augmented JPEGs (gitignored;
+                              deleted on success unless --keep-augmented)
   augmented/corner_manifest.csv  manifest for this run's training set
+                              (kept after cleanup for reproducibility)
 
 The per-run augmented/ folder isolates concurrent trainings: each run
 augments with the params recorded in its own config.yaml, and editing
 augmentation knobs while a job is mid-epoch can't corrupt anyone else.
+Once training finishes the JPEGs are removed to reclaim disk space
+(the manifest + config + aug_seed are enough to regenerate them).
 Pass --reuse-augmented PATH to skip the augmentation step and point at
-an existing manifest CSV instead (e.g. from a sibling run).
+an existing manifest CSV instead (e.g. from a sibling run);
+--keep-augmented preserves the JPEGs for debugging.
 
 Targets are 8 normalised coordinates in TL, TR, BR, BL order.
 Val pixel error is reported at each image's original resolution.
@@ -31,6 +35,7 @@ Usage:
     uv run scripts/train_corners.py
     uv run scripts/train_corners.py --config training/corner/configs/exp_resnet18.yaml
     uv run scripts/train_corners.py --reuse-augmented training/corner/runs/run_024/augmented/corner_manifest.csv
+    uv run scripts/train_corners.py --keep-augmented   # don't delete corner_train/ on success
 """
 
 import argparse
@@ -60,7 +65,7 @@ from src.image_io import load_board_image  # noqa: E402
 
 from augment_corners import (  # noqa: E402
     DEFAULT_COUNT, DEFAULT_SEED, SPLIT_FILE as TRAIN_SPLIT,
-    load_aug_params, manifest_path_for, run_augment,
+    image_dir_for, load_aug_params, manifest_path_for, run_augment,
 )
 
 
@@ -503,6 +508,14 @@ def main():
                              "augmented set inside the new run dir. "
                              "Useful for re-running training without "
                              "changing the data.")
+    parser.add_argument("--keep-augmented", action="store_true",
+                        help="Don't delete the augmented images on "
+                             "successful training. Default behaviour is "
+                             "to drop the per-run corner_train/ JPEGs "
+                             "(keeping the manifest CSV) to save disk. "
+                             "Ignored when --reuse-augmented is set, "
+                             "since the augmented set isn't owned by "
+                             "this run.")
     args = parser.parse_args()
 
     if not args.config.is_file():
@@ -528,6 +541,7 @@ def main():
         print(f"Run dir: {run_dir}")
         print(f"Config source: {args.config}\n")
 
+        owns_augmented = args.reuse_augmented is None
         if args.reuse_augmented is not None:
             train_manifest = args.reuse_augmented
             print(f"Reusing augmented set: {train_manifest}\n")
@@ -546,6 +560,14 @@ def main():
             print()
 
         train_one_run(config, run_dir, train_manifest)
+
+        if owns_augmented and not args.keep_augmented:
+            img_dir = image_dir_for(run_dir / "augmented")
+            if img_dir.is_dir():
+                print(f"\nCleaning augmented images: {img_dir}")
+                shutil.rmtree(img_dir)
+                print("  (kept manifest CSV; pass --keep-augmented to "
+                      "preserve images on the next run)")
     finally:
         sys.stdout = tee.stdout
         tee.close()
