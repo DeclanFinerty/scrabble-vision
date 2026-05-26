@@ -22,6 +22,7 @@ Usage:
     uv run scripts/verify_corners.py SCRABBLE_10
     uv run scripts/verify_corners.py SCRABBLE_10 --redo
     uv run scripts/verify_corners.py --batch --display-max 700
+    uv run scripts/verify_corners.py --group AG   # review every member
 """
 
 import argparse
@@ -408,6 +409,11 @@ def main():
                              "same corners + image flips to the rest of the "
                              "group (with y/n/r prompt). Single-image groups "
                              "fall back to the normal flow.")
+    parser.add_argument("--group", type=str, default=None, metavar="KEY",
+                        help="Re-review every image in a single named group "
+                             "(verified or not). Seeds GridFitUI with the "
+                             "stored corners so you can spot-check or fix a "
+                             "rotated label without re-typing filenames.")
     parser.add_argument("--redo", action="store_true",
                         help="With a single image, re-verify even if already done")
     parser.add_argument("--display-max", type=int,
@@ -416,14 +422,41 @@ def main():
                              "(default %(default)s; shrink for small screens)")
     args = parser.parse_args()
 
-    modes = sum([bool(args.image), args.batch, args.group_mode])
+    modes = sum([bool(args.image), args.batch, args.group_mode,
+                 bool(args.group)])
     if modes == 0:
-        parser.error("provide an image name, --batch, or --group-mode")
+        parser.error("provide an image name, --batch, --group-mode, "
+                     "or --group <KEY>")
     if modes > 1:
-        parser.error("--batch, --group-mode, and a positional image are "
-                     "mutually exclusive")
+        parser.error("--batch, --group-mode, --group, and a positional "
+                     "image are mutually exclusive")
 
     store = corners_store.load()
+
+    if args.group:
+        group_map = load_board_group_map()
+        if not group_map:
+            print(f"No board groups in {BOARD_GROUPS_FILE}. "
+                  f"Run scripts/label_boards.py first.")
+            sys.exit(1)
+        if args.group not in group_map:
+            print(f"Group {args.group!r} not in {BOARD_GROUPS_FILE}.")
+            print(f"Known keys: {', '.join(sorted(group_map))}")
+            sys.exit(1)
+        paths = resolve_paths(group_map[args.group])
+        if not paths:
+            print(f"No on-disk images for group {args.group!r}.")
+            return
+        print(f"Reviewing group {args.group!r}: {len(paths)} image(s).")
+        for i, img_path in enumerate(paths, start=1):
+            title = (f"[group {args.group!r} {i}/{len(paths)}] "
+                     f"{img_path.name}")
+            print(f"\n=== {title} ===")
+            result = process_one(img_path, store, title, args.display_max)
+            if result == "quit":
+                print("\nQuitting group review.")
+                break
+        return
 
     if args.group_mode:
         group_map = load_board_group_map()
