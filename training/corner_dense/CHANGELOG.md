@@ -11,7 +11,9 @@ runs in `training/corner/CHANGELOG.md`.
 
 # run_005 -- double aug
 - 80 augmentations
-- 
+- 1.7% validation. 
+- few outliers in test >10% error, but majority are around 1-2% error
+    - continuous scanning will fix this
 
 ## run_004 -- remove grid regularity
 - grid_reg loss has a technical problem.  If an image is warped and the points perfectly match up, there will be error because the distances are not equal.  
