@@ -68,6 +68,16 @@ A learned regressor replaces the heuristic `auto_detect_corners` for
 production use. The heuristic remains as a fallback for when the
 model is unavailable or produces low-confidence output.
 
+The shipping model is the **dense regressor** (`training/corner_dense/`,
+described below). Switching from 4-corner regression to dense
+supervision over all 256 grid intersections dropped mean val corner
+error from 2.7% (best 4-corner run, `training/corner/runs/run_015`)
+to 1.7% (`training/corner_dense/runs/run_005`) -- a ~40% relative
+reduction -- *with no additional labeling*: the 256 dense targets
+are derived analytically from the same 4 corner labels via
+perspective interpolation. The 4-corner regressor below is retained
+for ablation only.
+
 ### Architecture (`CornerRegressor` in `scripts/train_corners.py`)
 
 - Backbone: MobileNetV2 pretrained on ImageNet (ResNet18 also
@@ -106,8 +116,9 @@ model is unavailable or produces low-confidence output.
   reads very differently in raw pixels). See `evaluate()` in
   `scripts/train_corners.py`.
 - Best 4-corner result: 2.7% mean val error (run_015 -- see
-  `training/corner/CHANGELOG.md` for the per-run history). The
-  4-corner regressor is now superseded by the dense regressor below.
+  `training/corner/CHANGELOG.md` for the per-run history). Superseded
+  by the dense regressor below, which reaches 1.7% on the same val
+  set without any change to the labeling pipeline.
 
 ### Training pipeline
 
@@ -193,10 +204,13 @@ It's the shipping corner detector.
   board-corner indices (for direct comparison with the 4-corner
   runs) *and* mean error across all 256 lattice points. Both go into
   `metrics.json`; the per-epoch console line carries both.
-- **Best result**: run_005 -- 1.7% mean corner error / 1.08% all-256
-  error on val (54 images); 5.3% / 3.2% on the held-out test set
-  (22 images). See `training/corner_dense/CHANGELOG.md` for per-run
-  notes.
+- **Best result (shipping)**: run_005 -- 1.7% mean corner error /
+  1.08% all-256 error on val (54 images); 5.3% / 3.2% on the
+  held-out test set (22 images). Versus the best 4-corner run
+  (2.7% val), that's a ~40% relative reduction in corner error
+  from the dense supervision alone -- same input images, same
+  augmentation, same labels, just 256 supervision points instead
+  of 4. See `training/corner_dense/CHANGELOG.md` for per-run notes.
 - **Run dir layout** mirrors the 4-corner pipeline:
   `training/corner_dense/runs/run_NNN/` contains `config.yaml`,
   `best_model.pt`, `metrics.json` (best epoch + full history),
@@ -316,11 +330,14 @@ need their input/output paths updated for the new `data/` layout.
 
 - **Corner detection is feature-complete.** The dense regressor
   (`scripts/train_corner_dense.py`, run_005 ships) is the production
-  corner detector; the 4-corner regressor (`scripts/train_corners.py`)
-  is retained for ablation only. See `training/corner_dense/CHANGELOG.md`
-  for run notes and `data/annotations/corners.json` for the labeled
-  set. Follow-ups (from-scratch CNN comparison, ONNX export,
-  heuristic-vs-trained eval harness) live in `TODO.md`.
+  corner detector, with 1.7% mean val corner error -- down from
+  the 4-corner regressor's 2.7% on the same data, the biggest single
+  improvement to the corner stack. The 4-corner regressor
+  (`scripts/train_corners.py`) is retained for ablation only. See
+  `training/corner_dense/CHANGELOG.md` for run notes and
+  `data/annotations/corners.json` for the labeled set. Follow-ups
+  (from-scratch CNN comparison, ONNX export, heuristic-vs-trained
+  eval harness) live in `TODO.md`.
 - **Tile classification rebuild is the active focus.** The existing
   `models/tile_classifier.pt` continues to ship while the rebuild
   is in flight. `extract_tiles.py` / `augment_tiles.py` / `train.py` /
