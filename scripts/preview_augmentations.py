@@ -39,8 +39,8 @@ from src import corners_store  # noqa: E402
 from src.image_io import BOARD_IMAGE_EXTS, load_board_image  # noqa: E402
 
 from augment_corners import (  # noqa: E402
-    MAX_SOURCE_DIM, TARGET_SIZE,
-    apply_h, augment_one, downscale_matrix,
+    DEFAULT_CONFIG, MAX_SOURCE_DIM, TARGET_SIZE,
+    apply_h, augment_one, downscale_matrix, load_aug_params,
 )
 
 
@@ -127,7 +127,15 @@ def main():
                         help="Random seed (default: non-deterministic).")
     parser.add_argument("--save", type=Path, default=None,
                         help="Save grid to this path instead of displaying.")
+    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG,
+                        help="Training config to read augmentation "
+                             "params from (default %(default)s).")
     args = parser.parse_args()
+
+    aug = load_aug_params(args.config)
+    print(f"Augmentation params from {args.config}:")
+    for k, v in aug.items():
+        print(f"  {k}: {v}")
 
     path = find_image(args.image)
     if path is None:
@@ -157,7 +165,7 @@ def main():
     rng = np.random.default_rng(args.seed)
     cells = []
     for _ in range(N_SAMPLES):
-        aug_img, aug_corners = augment_one(image, corners_src, rng)
+        aug_img, aug_corners = augment_one(image, corners_src, rng, aug)
         cells.append(draw_corners(aug_img, aug_corners))
 
     grid = make_grid(cells)

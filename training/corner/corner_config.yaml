@@ -3,7 +3,7 @@
 
 # Optimiser
 lr: 1.0e-4
-batch_size: 4
+batch_size: 8
 epochs: 100
 
 # Model
@@ -20,3 +20,32 @@ lr_patience: 7            # ReduceLROnPlateau patience (epochs)
 early_stop_patience: 15   # stop after N epochs with no val improvement
 
 seed: 42
+
+# Augmentation (read by scripts/augment_corners.py)
+crop_probability: 1.0     # fraction of augmented samples that get a
+                          # random crop applied. The rest are letter-
+                          # boxed after rotate+perspective so the full
+                          # board stays visible.
+                          # default value: 1.0 (every sample cropped)
+min_board_visible: 0.60   # min fraction of the board polygon that
+                          # must remain inside the crop.
+                          # default value: 0.60
+min_corners_visible: 3    # min number of board corners that must lie
+                          # inside the crop (1-4).
+                          # default value: 4
+warp_magnitude: 0.05      # max perspective corner perturbation, as a
+                          # fraction of the image short side.
+                          # default value: 0.05
+border_mode: replicate    # border fill for the rotation+perspective
+                          # composite warp. "replicate" extends edge
+                          # pixels outward (closer to real images);
+                          # "constant" fills with black (the
+                          # historical behavior). Also accepts
+                          # "reflect" and "reflect_101".
+                          # default value: replicate
+aug_count: 40             # augmented samples generated per training
+                          # image (1 letterboxed "original" copy is
+                          # written in addition).
+                          # default value: 30
+aug_seed: 42               # rng seed for the augmentation pass.
+                          # default value: 0

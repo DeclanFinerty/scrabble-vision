@@ -2,8 +2,10 @@
 Generate augmented training data for the corner regressor.
 
 Reads:
-  data/splits/corner_train.txt  -- training filenames (one per line)
-  data/annotations/corners.json -- ground-truth corner coordinates
+  data/splits/corner_train.txt    -- training filenames (one per line)
+  data/annotations/corners.json   -- ground-truth corner coordinates
+  training/corner/corner_config.yaml  -- augmentation parameters
+      (override path with --config)
 
 For each training image, writes:
   - The original resized to 224x224 (no spatial augmentation).
@@ -12,9 +14,12 @@ For each training image, writes:
 Each augmented sample composes all four transforms in order, each
 with random parameters:
   1. Rotation:    uniform 0-360 degrees, canvas expands to fit.
-  2. Perspective: each rect corner perturbed up to 5% of image dim.
-  3. Random crop: square crop containing >=60% of the board area
-                  and >=2 corners in-frame, resized to 224x224.
+  2. Perspective: each rect corner perturbed up to `warp_magnitude`
+                  of image dim.
+  3. Random crop: with probability `crop_probability`, take a square
+                  crop containing >=`min_board_visible` of the board
+                  area and >=`min_corners_visible` corners; otherwise
+                  letterbox the full rotated+warped frame.
   4. Color jitter: brightness/contrast/saturation/hue (image only).
 
 The spatial transforms (1-3) are composed as a single 3x3 homography
@@ -26,14 +31,20 @@ point tolerance, or augmentation aborts.
 Normalized corner coords in the manifest may fall outside [0, 1]
 when the crop excludes one or two corners -- this is intentional.
 
-Outputs:
-  data/augmented/corner_train/<stem>_orig.jpg
-  data/augmented/corner_train/<stem>_<NNN>.jpg
-  data/augmented/corner_manifest.csv  (image_path + 8 coords + source)
+Outputs (under --out-dir, default data/augmented/):
+  <out_dir>/corner_train/<stem>_orig.jpg
+  <out_dir>/corner_train/<stem>_<NNN>.jpg
+  <out_dir>/corner_manifest.csv   (image_path + 8 coords + source)
+
+`train_corners.py` invokes this programmatically via `run_augment()`
+and points --out-dir at the new run's directory, so concurrent runs
+don't trample each other's training data.
 
 Usage:
     uv run scripts/augment_corners.py
     uv run scripts/augment_corners.py --count 50 --seed 42
+    uv run scripts/augment_corners.py --config path/to/custom.yaml
+    uv run scripts/augment_corners.py --out-dir training/corner/runs/run_024/augmented
 """
 
 import argparse
@@ -43,6 +54,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -51,16 +63,38 @@ from src.image_io import load_board_image  # noqa: E402
 
 
 SPLIT_FILE = Path("data/splits/corner_train.txt")
-OUT_IMG_DIR = Path("data/augmented/corner_train")
-OUT_MANIFEST = Path("data/augmented/corner_manifest.csv")
+DEFAULT_OUT_DIR = Path("data/augmented")
 BOARDS_DIR = Path("data/raw/boards")
+DEFAULT_CONFIG = Path("training/corner/corner_config.yaml")
+DEFAULT_COUNT = 30
+DEFAULT_SEED = 0
+
+
+def manifest_path_for(out_dir: Path) -> Path:
+    return out_dir / "corner_manifest.csv"
+
+
+def image_dir_for(out_dir: Path) -> Path:
+    return out_dir / "corner_train"
 
 TARGET_SIZE = 224
 MAX_SOURCE_DIM = 1024
-PERSPECTIVE_FRAC = 0.05
-CROP_MIN_BOARD_FRAC = 0.60
-CROP_MIN_CORNERS = 2
 CROP_MAX_ATTEMPTS = 50
+# Fallback defaults if a config is missing the augmentation block.
+DEFAULT_AUG = {
+    "crop_probability": 0.3,
+    "min_board_visible": 0.85,
+    "min_corners_visible": 4,
+    "warp_magnitude": 0.03,
+    "border_mode": "replicate",
+}
+
+BORDER_MODES = {
+    "constant": cv2.BORDER_CONSTANT,
+    "replicate": cv2.BORDER_REPLICATE,
+    "reflect": cv2.BORDER_REFLECT,
+    "reflect_101": cv2.BORDER_REFLECT_101,
+}
 # Tolerance for the round-trip check, in pixels of the 224-pixel
 # output. 1e-3 px is ~4e-6 normalized -- well under any meaningful
 # label noise, while still catching genuine math bugs.
@@ -187,7 +221,10 @@ def count_corners_in_crop(corners: np.ndarray,
 
 
 def pick_crop(corners: np.ndarray, image_size: tuple[int, int],
-              rng: np.random.Generator) -> tuple[float, float, float, float]:
+              rng: np.random.Generator,
+              min_board_visible: float,
+              min_corners_visible: int,
+              ) -> tuple[float, float, float, float]:
     iw, ih = image_size
     short = float(min(iw, ih))
     board_area = polygon_area(corners)
@@ -212,8 +249,8 @@ def pick_crop(corners: np.ndarray, image_size: tuple[int, int],
         inside_px = board_area_in_crop(corners_local,
                                        int(round(side)), int(round(side)))
         frac = inside_px / board_area if board_area > 0 else 0.0
-        if (frac >= CROP_MIN_BOARD_FRAC
-                and count_corners_in_crop(corners, crop) >= CROP_MIN_CORNERS):
+        if (frac >= min_board_visible
+                and count_corners_in_crop(corners, crop) >= min_corners_visible):
             return crop
 
     # Fallback: bounding box of the board, padded, clipped to image.
@@ -252,27 +289,36 @@ def color_jitter(image: np.ndarray, rng: np.random.Generator) -> np.ndarray:
 # --- Pipeline -----------------------------------------------------
 
 def augment_one(image: np.ndarray, corners_src: np.ndarray,
-                rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray]:
+                rng: np.random.Generator,
+                aug: dict) -> tuple[np.ndarray, np.ndarray]:
     h, w = image.shape[:2]
 
     angle = float(rng.uniform(0.0, 360.0))
     M_rot, (rw, rh) = rotation_matrix((w, h), angle)
-    M_persp = perspective_matrix((rw, rh), PERSPECTIVE_FRAC, rng)
+    M_persp = perspective_matrix((rw, rh), float(aug["warp_magnitude"]), rng)
 
     M_pre = M_persp @ M_rot
     corners_pre = apply_h(M_pre, corners_src)
 
-    crop = pick_crop(corners_pre, (rw, rh), rng)
-    M_cs = crop_scale_matrix(crop, TARGET_SIZE)
-    M_total = M_cs @ M_pre
+    if rng.random() < float(aug["crop_probability"]):
+        crop = pick_crop(corners_pre, (rw, rh), rng,
+                         float(aug["min_board_visible"]),
+                         int(aug["min_corners_visible"]))
+        M_post = crop_scale_matrix(crop, TARGET_SIZE)
+    else:
+        # No crop: letterbox the full rotated+warped frame so the
+        # whole board stays visible and the aspect ratio matches the
+        # val/inference letterbox pipeline.
+        M_post, _, _ = letterbox_matrix((rw, rh), TARGET_SIZE)
 
+    M_total = M_post @ M_pre
     corners_final = apply_h(M_total, corners_src)
     round_trip_check(M_total, corners_src, corners_final, ROUND_TRIP_TOL)
 
     warped = cv2.warpPerspective(
         image, M_total, (TARGET_SIZE, TARGET_SIZE),
         flags=cv2.INTER_LINEAR,
-        borderMode=cv2.BORDER_CONSTANT,
+        borderMode=BORDER_MODES[aug["border_mode"]],
         borderValue=(0, 0, 0),
     )
     warped = color_jitter(warped, rng)
@@ -331,11 +377,15 @@ def letterbox_original(image: np.ndarray, corners_src: np.ndarray
 
 
 def color_only_one(image: np.ndarray, corners_src: np.ndarray,
-                   rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray]:
+                   rng: np.random.Generator,
+                   aug: dict) -> tuple[np.ndarray, np.ndarray]:
     """Color jitter only -- no rotation, perspective, or crop.
     Image is letterboxed to TARGET_SIZE so the corners stay anchored
     to the same physical board features and the aspect ratio matches
-    the val/inference pipeline."""
+    the val/inference pipeline. `aug` is accepted for a uniform
+    signature but unused -- color-only samples don't go through the
+    spatial knobs."""
+    del aug
     letterboxed, corners_final = letterbox_original(image, corners_src)
     return color_jitter(letterboxed, rng), corners_final
 
@@ -354,24 +404,47 @@ def manifest_row(path: Path, corners_224: np.ndarray, source: str) -> list:
 
 # --- Main ---------------------------------------------------------
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__.split("\n")[1])
-    parser.add_argument("--count", type=int, default=30,
-                        help="Augmented samples per training image "
-                             "(default %(default)s).")
-    parser.add_argument("--seed", type=int, default=0,
-                        help="Random seed (default %(default)s).")
-    parser.add_argument("--split", type=Path, default=SPLIT_FILE,
-                        help="Split manifest (default %(default)s).")
-    args = parser.parse_args()
+def load_aug_params(config_path: Path) -> dict:
+    """Read augmentation params from a YAML config. Missing keys fall
+    back to DEFAULT_AUG so older configs keep working."""
+    if not config_path.is_file():
+        print(f"Config not found: {config_path}")
+        sys.exit(1)
+    raw = yaml.safe_load(config_path.read_text()) or {}
+    aug = dict(DEFAULT_AUG)
+    for k in DEFAULT_AUG:
+        if k in raw:
+            aug[k] = raw[k]
+    if not 0.0 <= float(aug["crop_probability"]) <= 1.0:
+        raise ValueError(f"crop_probability out of [0, 1]: {aug['crop_probability']}")
+    if not 0.0 < float(aug["min_board_visible"]) <= 1.0:
+        raise ValueError(f"min_board_visible out of (0, 1]: {aug['min_board_visible']}")
+    if not 1 <= int(aug["min_corners_visible"]) <= 4:
+        raise ValueError(f"min_corners_visible out of [1, 4]: {aug['min_corners_visible']}")
+    if float(aug["warp_magnitude"]) < 0.0:
+        raise ValueError(f"warp_magnitude must be >= 0: {aug['warp_magnitude']}")
+    if str(aug["border_mode"]).lower() not in BORDER_MODES:
+        raise ValueError(
+            f"border_mode {aug['border_mode']!r} not in "
+            f"{sorted(BORDER_MODES)}"
+        )
+    aug["border_mode"] = str(aug["border_mode"]).lower()
+    return aug
 
-    train_names = read_split(args.split)
+
+def run_augment(out_dir: Path, aug: dict, count: int, seed: int,
+                split_file: Path = SPLIT_FILE) -> Path:
+    """Programmatic entry point. Writes augmented images + manifest
+    under `out_dir` and returns the manifest path. Called both by
+    main() (CLI) and train_corners.py (per-run augmentation)."""
+    img_dir = image_dir_for(out_dir)
+    manifest = manifest_path_for(out_dir)
+    img_dir.mkdir(parents=True, exist_ok=True)
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+
+    train_names = read_split(split_file)
     corner_entries = corners_store.load()
-
-    OUT_IMG_DIR.mkdir(parents=True, exist_ok=True)
-    OUT_MANIFEST.parent.mkdir(parents=True, exist_ok=True)
-
-    rng = np.random.default_rng(args.seed)
+    rng = np.random.default_rng(seed)
 
     rows: list[list] = []
     n_orig = n_aug = 0
@@ -414,30 +487,30 @@ def main():
             aug_fn = augment_one
             n_full_sources += 1
 
-        orig_path = OUT_IMG_DIR / f"{stem}_orig.jpg"
+        orig_path = img_dir / f"{stem}_orig.jpg"
         cv2.imwrite(str(orig_path), orig_img,
                     [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
         rows.append(manifest_row(orig_path, orig_corners, fname))
         n_orig += 1
 
-        for k in range(args.count):
-            aug_img, aug_corners = aug_fn(image, corners_src, rng)
-            out_path = OUT_IMG_DIR / f"{stem}_{k:03d}.jpg"
+        for k in range(count):
+            aug_img, aug_corners = aug_fn(image, corners_src, rng, aug)
+            out_path = img_dir / f"{stem}_{k:03d}.jpg"
             cv2.imwrite(str(out_path), aug_img,
                         [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
             rows.append(manifest_row(out_path, aug_corners, fname))
             n_aug += 1
 
-        print(f"[{i}/{len(train_names)}] {fname}: 1 orig + {args.count} aug "
+        print(f"[{i}/{len(train_names)}] {fname}: 1 orig + {count} aug "
               f"({level})")
 
-    with OUT_MANIFEST.open("w", newline="") as f:
+    with manifest.open("w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(MANIFEST_HEADER)
         writer.writerows(rows)
 
     print()
-    print(f"Wrote {len(rows)} rows to {OUT_MANIFEST}")
+    print(f"Wrote {len(rows)} rows to {manifest}")
     print(f"  Source images:    {n_full_sources + n_color_sources}  "
           f"(full={n_full_sources}, color_only={n_color_sources})")
     print(f"  Originals:        {n_orig}")
@@ -446,6 +519,47 @@ def main():
         print(f"  Skipped:          {len(skipped)}")
         for s in skipped:
             print(f"    {s}")
+    return manifest
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__.split("\n")[1])
+    parser.add_argument("--count", type=int, default=None,
+                        help="Augmented samples per training image "
+                             "(overrides aug_count in the config; "
+                             "default falls back to the config or "
+                             f"{DEFAULT_COUNT}).")
+    parser.add_argument("--seed", type=int, default=None,
+                        help="Random seed (overrides aug_seed in the "
+                             f"config; default falls back to the "
+                             f"config or {DEFAULT_SEED}).")
+    parser.add_argument("--split", type=Path, default=SPLIT_FILE,
+                        help="Split manifest (default %(default)s).")
+    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG,
+                        help="Training config to read augmentation "
+                             "params from (default %(default)s).")
+    parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR,
+                        help="Where to write the augmented images and "
+                             "manifest. Each subdir + manifest is "
+                             "rewritten in place. Default %(default)s.")
+    args = parser.parse_args()
+
+    aug = load_aug_params(args.config)
+    raw = yaml.safe_load(args.config.read_text()) or {}
+    count = args.count if args.count is not None else int(
+        raw.get("aug_count", DEFAULT_COUNT))
+    seed = args.seed if args.seed is not None else int(
+        raw.get("aug_seed", DEFAULT_SEED))
+
+    print(f"Augmentation params from {args.config}:")
+    for k, v in aug.items():
+        print(f"  {k}: {v}")
+    print(f"  aug_count: {count}")
+    print(f"  aug_seed: {seed}")
+    print(f"Out dir: {args.out_dir}")
+    print()
+
+    run_augment(args.out_dir, aug, count, seed, args.split)
 
 
 if __name__ == "__main__":
