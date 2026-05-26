@@ -15,7 +15,7 @@ from pathlib import Path
 import argparse
 import random
 
-from src.classification.model import CLASSES
+from classification.model import CLASSES
 
 
 POINT_VALUES = {

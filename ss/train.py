@@ -22,7 +22,7 @@ import argparse
 import time
 import random
 
-from src.classification.model import (
+from classification.model import (
     TileClassifier, TILE_INPUT_SIZE, NUM_CLASSES, CLASSES, export_onnx
 )
 

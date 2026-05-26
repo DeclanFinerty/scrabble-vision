@@ -16,7 +16,7 @@ import argparse
 from pathlib import Path
 from collections import defaultdict
 
-from src.detection.grid_detect import (
+from detection.grid_detect import (
     detect_grid, extract_cell_images, load_corners, GRID_SIZE
 )
 

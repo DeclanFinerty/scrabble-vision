@@ -15,11 +15,11 @@ import argparse
 import time
 from pathlib import Path
 
-from src.detection.grid_detect import (
+from detection.grid_detect import (
     detect_grid, extract_cell_images, debug_grid,
     save_corners, load_corners, GRID_SIZE
 )
-from src.classification.model import (
+from classification.model import (
     load_model, predict_tiles, classify_result
 )
 

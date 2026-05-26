@@ -17,11 +17,11 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 import json
 
-from src.detection.grid_detect import (
+from detection.grid_detect import (
     detect_grid, extract_cell_images, auto_detect_corners, order_corners,
     GRID_SIZE
 )
-from src.classification.model import (
+from classification.model import (
     load_model, predict_tiles, classify_result
 )
 
