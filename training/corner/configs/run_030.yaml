@@ -1,0 +1,33 @@
+# 20 aug per image, 50% of samples cropped, 50% letterboxed.
+# Note: the file is named run_0230for bookkeeping; the actual run
+# directory written by train_corners.py will be the next free
+# runs/run_NNN/ slot, which may not match this number.
+
+# this run should be a direct comparison with 15 and 25, just with more data
+# border mode was black in 15
+
+# Optimiser
+lr: 1.0e-4
+batch_size: 8
+epochs: 100
+
+# Model
+backbone: mobilenetv2
+unfreeze_layers: -1
+pool_size: 7
+dropout: 0.3
+
+# Scheduling
+lr_patience: 7
+early_stop_patience: 15
+
+seed: 42
+
+# Augmentation
+crop_probability: 1.0
+min_board_visible: 0.60
+min_corners_visible: 2
+warp_magnitude: 0.05
+border_mode: constant
+aug_count: 40
+aug_seed: 42
