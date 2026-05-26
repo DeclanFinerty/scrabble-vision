@@ -4,7 +4,89 @@ What changed between training runs of `scripts/train_corners.py`,
 newest first. Each `run_NNN/` directory under `runs/` is a frozen
 snapshot of one experiment (config, weights, metrics, log).
 
-# run_016 -- testing batch sizes
+## run_034 -- -- tested unfreezing layers again
+- tested layer unfreezing to see if it maintained earlier worse results
+- 
+
+## run_033 -- tested seed 
+- ran run_026 parameters, but with seed 123 (not aug_seed) to test replicability
+- 5% error
+
+## run_032 -- tested aug size
+- redued aug to 20 from 40
+- 100% prob, 3 corners, replicate boundary
+- 3.2%
+
+## run_031 -- tested constant fill
+- tested constant fill for 3 corners with 40, 100% prob
+- 5.4%
+
+## run_030  -- redo earlier runs with constant
+- this should be comapared to 25
+- 40 aug, 100% and 2 corners
+- changed replicate borders to black box constant
+- 4.42
+
+## run_029 -- lowered aug
+- aug 20
+- crop prob 50, min corners 2
+- 3.8%
+
+## run_028 -- keep low corner prob, increase corners
+- crop prob at 50%, minimum corners at 3.  Aug 40
+- 2.68%
+
+## run_027 -- change crop prob
+- used minimum corners=2, changed crop prob to 50% from 100%
+- 40 aug
+- 4.53 error
+
+## run_026 -- chnage minimum corners
+- changed minimum corners to 3 from 2
+- 40 aug, 100% prob
+- 2.5%
+
+## run_025 -- rerun with 40aug
+- 40 aug
+- have been using 30 count from the default, this changed once we started loading the augmentations inside the training script.  Rerun same config with 40 instead to gauge difference
+- 5.21% error
+
+## run_024 -- replicate bounds 
+- replicate bounds added so there aren't black boxes
+- still 100% cropping
+- likely uses 30 instead of the 40, realized train_corners was using a default of 30 because it is called inside
+- 2.8%
+
+## run_023 -- original validation with new data
+- went back to grammy's boards as validation
+- makes sense because likely board pictures
+
+## run_022 -- different validation
+- ranwith red boards as validation
+- worse as well
+
+## run_021 -- add data
+- we added the final solid online dataset (includes shadows)
+- also changed the group in the validation set.  Grammy's board group had large outlier that would be better for training, and my board group has more images
+- poor validation loss
+
+## run_020 -- dropout increase
+- increase dropout to 0.5
+- hurt training, switching back to 0.3
+
+## run_019 -- reverted aug. magnitude and increase volume
+- increased to 80 augmented images
+-- slighlty worse than 40
+
+## run _018 -- tweaked magnitude of cropping augmentation 
+- added augmentation params to config
+- ran with less cropping, config was saved
+- less cropping produced slightly worse results
+
+## run_017 -- testing larger batch size
+- run batch size 16
+
+## run_016 -- testing batch sizes
 - run batch size 4 with 40 augementation each first
 - error trajectory was more noisy
 

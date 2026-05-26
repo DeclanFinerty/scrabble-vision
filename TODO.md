@@ -15,6 +15,7 @@ detection training push. They're parked so they don't get lost.
 
 ## Corner detection -- follow-ups
 
+- Add more labels than just the 4 corners.  For example, label every intersection on the grid.  Caled dense supervision, gives more gradient signals
 - Train a from-scratch CNN for corner detection and compare against
   MobileNetV2 transfer learning (does the pretraining actually help
   at our dataset size?).
@@ -27,11 +28,6 @@ detection training push. They're parked so they don't get lost.
   tile classifier's `.pt` + `.onnx` pairing).
 - Rust inference server for corner detection (latency / deploy
   target separate from the Python FastAPI server).
-- Add the remaining Roboflow datasets for additional training data:
-  - Dataset 2: 70 images, single board.
-  - Dataset 3: 127 images, single board.
-  (Both are single-board, so the board-level split rule means every
-  image in each dataset goes into one split.)
 - Automated evaluation comparing heuristic `auto_detect_corners`
   vs the trained model on the same test set, so we can track the
   delta over time rather than eyeballing it.

@@ -6,9 +6,12 @@ training loop. Everything here is an `argparse` CLI; run any with
 
 The pipeline assumes the layout in `SPEC.md` / `data/README.md`:
 raw photos under `data/raw/boards/`, annotations under
-`data/annotations/`, augmented training data under `data/augmented/`,
-splits under `data/splits/`, and training runs under
-`training/corner/runs/`.
+`data/annotations/`, splits under `data/splits/`, and training runs
+under `training/corner/runs/`. Augmented training data lives next to
+the run that uses it (`training/corner/runs/run_NNN/augmented/`),
+generated automatically by `train_corners.py`. The legacy
+`data/augmented/` location is still the default when running
+`augment_corners.py` standalone (e.g. for ad-hoc inspection).
 
 ## Pipeline order
 
@@ -51,7 +54,10 @@ splits under `data/splits/`, and training runs under
                                          v
                             +--------------------------------+
                             |  augment_corners.py            |
-                            |  build 224x224 training set    |
+                            |  build 224x224 training set.   |
+                            |  optional: train_corners.py    |
+                            |  calls this internally and     |
+                            |  writes into the run dir.      |
                             +--------------------------------+
                                          v
                             +--------------------------------+
@@ -62,7 +68,9 @@ splits under `data/splits/`, and training runs under
                                          v
                             +--------------------------------+
                             |  train_corners.py              |
-                            |  -> training/corner/runs/run_N |
+                            |  augments into                 |
+                            |    runs/run_N/augmented/ then  |
+                            |    trains -> runs/run_N/       |
                             +--------------------------------+
                                          v
                             +--------------------------------+
@@ -168,16 +176,22 @@ Writes: `data/splits/corner_{train,val,test}.txt`
 
 ### `augment_corners.py`
 Reads `corner_train.txt` + `corners.json` and produces N
-augmentations per image (default 30) into `data/augmented/`,
-branching on each image's `augment_level`. Round-trip checks the
-coordinate math per sample (T_inv(T(corners)) must equal the source
-corners to floating-point tolerance) so any silent label drift
-aborts the run.
+augmentations per image (default `aug_count` from config, fallback
+30) into `--out-dir` (default `data/augmented/`), branching on each
+image's `augment_level`. Round-trip checks the coordinate math per
+sample (T_inv(T(corners)) must equal the source corners to
+floating-point tolerance) so any silent label drift aborts the run.
+
+`train_corners.py` calls this programmatically (via `run_augment()`)
+and points `--out-dir` at the new run's `augmented/` subdir, so two
+trainings can run in parallel with different augmentation params
+without trampling each other's data. Run it standalone only for
+ad-hoc inspection.
 
 Reads: `data/splits/corner_train.txt`, `data/annotations/corners.json`,
-  `data/raw/boards/**/*`
-Writes: `data/augmented/corner_train/*.jpg`,
-  `data/augmented/corner_manifest.csv`
+  `data/raw/boards/**/*`, `training/corner/corner_config.yaml`
+Writes: `<out_dir>/corner_train/*.jpg`,
+  `<out_dir>/corner_manifest.csv`
 
 ### `preview_augmentations.py`
 Spot-check tool. Shows 20 augmentations of one source image in a
@@ -188,25 +202,35 @@ Reads: one source image + its corners
 Writes: nothing by default, or `out.png` with `--save`
 
 ### `sanity_check_corners.py`
-Picks N random rows from `corner_manifest.csv`, draws the
-manifest's coords onto the 224x224 image, saves to
-`training/corner/sanity_check/`. Also reports min/max ranges of
-all manifest coords (expect mostly `[0, 1]` with a tail of negatives
-and values >1 from crops that excluded corners). Catches augmentation
-labeling bugs *before* they silently train a bad model.
+Picks N random rows from a `corner_manifest.csv` (default
+`data/augmented/corner_manifest.csv`; pass `--manifest
+training/corner/runs/run_NNN/augmented/corner_manifest.csv` for a
+per-run check), draws the manifest's coords onto the 224x224 image,
+saves to `training/corner/sanity_check/`. Also reports min/max ranges
+of all manifest coords (expect mostly `[0, 1]` with a tail of
+negatives and values >1 from crops that excluded corners). Catches
+augmentation labeling bugs *before* they silently train a bad model.
 
-Reads: `data/augmented/corner_manifest.csv`
+Reads: `--manifest` (default `data/augmented/corner_manifest.csv`)
 Writes: `training/corner/sanity_check/<sample>.jpg`
 
 ## Stage 4 — Train
 
 ### `train_corners.py`
 Reads `training/corner/corner_config.yaml` (or `--config <path>`),
-builds a MobileNetV2 or ResNet18 + regression-head model, trains on
-the augmented manifest, evaluates per-epoch against `corner_val.txt`
-(letterboxed, no augmentation), and writes everything to an
-auto-incrementing `training/corner/runs/run_NNN/` directory:
+builds a MobileNetV2 or ResNet18 + regression-head model. Before
+training it generates a fresh augmented set into the new run's
+`augmented/` subdir (via `augment_corners.run_augment()`) so the
+training data, the params that produced it, and the trained weights
+all live next to each other. Pass `--reuse-augmented <manifest_path>`
+to skip augmentation and reuse a sibling run's data instead.
+
+Evaluates per-epoch against `corner_val.txt` (letterboxed, no
+augmentation), and writes everything to an auto-incrementing
+`training/corner/runs/run_NNN/` directory:
 - `config.yaml` (snapshot of config used)
+- `augmented/corner_train/*.jpg` + `augmented/corner_manifest.csv`
+  (per-run training data)
 - `best_model.pt` (state_dict at best val epoch)
 - `metrics.json` (best-epoch + full per-epoch history, both px and
   % of image diagonal)
@@ -217,9 +241,10 @@ Loss is `SmoothL1` on normalized coords. Pixel + diagonal-% errors
 are reported alongside in eval.
 
 Reads: `training/corner/corner_config.yaml`,
-  `data/augmented/corner_manifest.csv`,
-  `data/splits/corner_val.txt`, `data/annotations/corners.json`
-Writes: `training/corner/runs/run_NNN/`
+  `data/splits/corner_{train,val}.txt`, `data/annotations/corners.json`,
+  `data/raw/boards/**/*`
+Writes: `training/corner/runs/run_NNN/` (including its `augmented/`
+  subdir, unless `--reuse-augmented` is given)
 
 ## Stage 5 — Evaluate
 

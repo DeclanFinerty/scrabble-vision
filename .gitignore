@@ -14,6 +14,10 @@ data/
 # and CHANGELOG are tracked; per-run artifacts are not.
 training/corner/runs/
 
+# Ad-hoc augmentation previews + sanity-check renders (script output).
+training/corner/previews/
+training/corner/sanity_check/
+
 # Debug outputs
 debug_*.jpg
 corners.npy
