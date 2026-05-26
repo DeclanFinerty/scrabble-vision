@@ -1,10 +1,12 @@
 """
 Visual + numeric sanity check on the augmented training data.
 
-Picks N random rows from data/augmented/corner_manifest.csv, draws
-the manifest's normalized corner coords on the 224x224 image, and
-saves to training/corner/sanity_check/. Also reports min/max of all
-coordinates so we can confirm the distribution is sensible
+Picks N random rows from a corner_manifest.csv (default
+data/augmented/corner_manifest.csv; pass --manifest to point at a
+per-run augmented set under training/corner/runs/run_NNN/augmented/),
+draws the manifest's normalized corner coords on the 224x224 image,
+and saves to training/corner/sanity_check/. Also reports min/max of
+all coordinates so we can confirm the distribution is sensible
 (mostly [0,1] with a tail of negatives / >1 from crops that
 excluded a corner).
 
@@ -19,6 +21,7 @@ preview_augmentations.py).
 Usage:
     uv run scripts/sanity_check_corners.py
     uv run scripts/sanity_check_corners.py --count 10 --seed 0
+    uv run scripts/sanity_check_corners.py --manifest training/corner/runs/run_024/augmented/corner_manifest.csv
 """
 
 import argparse
@@ -31,7 +34,7 @@ import cv2
 import numpy as np
 
 
-MANIFEST = Path("data/augmented/corner_manifest.csv")
+DEFAULT_MANIFEST = Path("data/augmented/corner_manifest.csv")
 OUT_DIR = Path("training/corner/sanity_check")
 
 # Same palette as preview_augmentations.py.
@@ -62,17 +65,22 @@ def main():
                         help="Number of random samples (default 5).")
     parser.add_argument("--seed", type=int, default=None,
                         help="Random seed (default: non-deterministic).")
+    parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST,
+                        help=f"Path to a corner_manifest.csv "
+                             f"(default {DEFAULT_MANIFEST}).")
     args = parser.parse_args()
 
-    if not MANIFEST.is_file():
-        print(f"Manifest not found: {MANIFEST}")
-        print("Run scripts/augment_corners.py first.")
+    manifest = args.manifest
+    if not manifest.is_file():
+        print(f"Manifest not found: {manifest}")
+        print("Run scripts/augment_corners.py first, or pass --manifest "
+              "pointing at a per-run augmented set.")
         sys.exit(1)
 
-    with MANIFEST.open() as f:
+    with manifest.open() as f:
         rows = list(csv.DictReader(f))
     if not rows:
-        print(f"Empty manifest: {MANIFEST}")
+        print(f"Empty manifest: {manifest}")
         sys.exit(1)
 
     xs, ys = [], []
@@ -84,7 +92,7 @@ def main():
     n_x_in = int(((xs_a >= 0) & (xs_a <= 1)).sum())
     n_y_in = int(((ys_a >= 0) & (ys_a <= 1)).sum())
 
-    print(f"Manifest:  {MANIFEST}  ({len(rows)} rows)")
+    print(f"Manifest:  {manifest}  ({len(rows)} rows)")
     print(f"  X range:        [{xs_a.min():+.4f}, {xs_a.max():+.4f}]   "
           f"mean {xs_a.mean():+.4f}")
     print(f"  Y range:        [{ys_a.min():+.4f}, {ys_a.max():+.4f}]   "

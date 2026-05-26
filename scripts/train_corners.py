@@ -4,16 +4,25 @@ regression head) on the augmented training set.
 
 Reads:
   training/corner/corner_config.yaml   -- config (overridable with --config)
-  data/augmented/corner_manifest.csv   -- pre-augmented training set
   data/splits/corner_val.txt           -- val filenames (no augmentation)
-  data/annotations/corners.json        -- corners for val images
+  data/splits/corner_train.txt         -- train filenames (used by augment)
+  data/annotations/corners.json        -- corners for val + augment
 
 Writes (auto-incrementing) training/corner/runs/run_NNN/:
-  config.yaml       copy of the config that produced this run
-  best_model.pt     state_dict at the lowest val-loss epoch
-  metrics.json      best-epoch metrics + full per-epoch history
-  loss_curve.png    train + val Smooth L1 loss per epoch
-  log.txt           stdout duplicate
+  config.yaml                 copy of the config that produced this run
+  best_model.pt               state_dict at the lowest val-loss epoch
+  metrics.json                best-epoch metrics + full per-epoch history
+  loss_curve.png              train + val Smooth L1 loss per epoch
+  log.txt                     stdout duplicate
+  augmented/corner_train/     per-run augmented JPEGs (gitignored with
+                              the rest of runs/)
+  augmented/corner_manifest.csv  manifest for this run's training set
+
+The per-run augmented/ folder isolates concurrent trainings: each run
+augments with the params recorded in its own config.yaml, and editing
+augmentation knobs while a job is mid-epoch can't corrupt anyone else.
+Pass --reuse-augmented PATH to skip the augmentation step and point at
+an existing manifest CSV instead (e.g. from a sibling run).
 
 Targets are 8 normalised coordinates in TL, TR, BR, BL order.
 Val pixel error is reported at each image's original resolution.
@@ -21,6 +30,7 @@ Val pixel error is reported at each image's original resolution.
 Usage:
     uv run scripts/train_corners.py
     uv run scripts/train_corners.py --config training/corner/configs/exp_resnet18.yaml
+    uv run scripts/train_corners.py --reuse-augmented training/corner/runs/run_024/augmented/corner_manifest.csv
 """
 
 import argparse
@@ -43,14 +53,19 @@ import torchvision.models as tvm  # noqa: E402
 import yaml  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from src import corners_store  # noqa: E402
 from src.image_io import load_board_image  # noqa: E402
 
+from augment_corners import (  # noqa: E402
+    DEFAULT_COUNT, DEFAULT_SEED, SPLIT_FILE as TRAIN_SPLIT,
+    load_aug_params, manifest_path_for, run_augment,
+)
+
 
 DEFAULT_CONFIG = Path("training/corner/corner_config.yaml")
 RUNS_DIR = Path("training/corner/runs")
-TRAIN_MANIFEST = Path("data/augmented/corner_manifest.csv")
 VAL_SPLIT = Path("data/splits/corner_val.txt")
 BOARDS_DIR = Path("data/raw/boards")
 
@@ -342,7 +357,8 @@ def save_loss_curve(history: dict[str, list[float]], path: Path) -> None:
 
 # --- Training loop -----------------------------------------------
 
-def train_one_run(config: dict, run_dir: Path) -> dict:
+def train_one_run(config: dict, run_dir: Path,
+                  train_manifest: Path) -> dict:
     seed = int(config["seed"])
     torch.manual_seed(seed)
     np.random.seed(seed)
@@ -353,8 +369,8 @@ def train_one_run(config: dict, run_dir: Path) -> dict:
     print(f"Device: {device}")
     print(f"Config: {json.dumps(config, indent=2)}\n")
 
-    print("Loading train manifest...")
-    train_ds = CornerManifestDataset(TRAIN_MANIFEST)
+    print(f"Loading train manifest: {train_manifest}")
+    train_ds = CornerManifestDataset(train_manifest)
     train_dl = torch.utils.data.DataLoader(
         train_ds,
         batch_size=int(config["batch_size"]),
@@ -480,21 +496,28 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[1])
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG,
                         help=f"Path to training config (default: {DEFAULT_CONFIG}).")
+    parser.add_argument("--reuse-augmented", type=Path, default=None,
+                        metavar="MANIFEST",
+                        help="Path to an existing corner_manifest.csv "
+                             "to reuse, instead of generating a fresh "
+                             "augmented set inside the new run dir. "
+                             "Useful for re-running training without "
+                             "changing the data.")
     args = parser.parse_args()
 
     if not args.config.is_file():
         print(f"Config not found: {args.config}")
         sys.exit(1)
-    if not TRAIN_MANIFEST.is_file():
-        print(f"Train manifest not found: {TRAIN_MANIFEST}")
-        print("Run scripts/augment_corners.py first.")
-        sys.exit(1)
     if not VAL_SPLIT.is_file():
         print(f"Val split not found: {VAL_SPLIT}")
         print("Run scripts/make_splits.py first.")
         sys.exit(1)
+    if args.reuse_augmented is not None and not args.reuse_augmented.is_file():
+        print(f"--reuse-augmented manifest not found: {args.reuse_augmented}")
+        sys.exit(1)
 
-    config = resolve_config(yaml.safe_load(args.config.read_text()))
+    raw_config = yaml.safe_load(args.config.read_text()) or {}
+    config = resolve_config(raw_config)
 
     run_dir = next_run_dir(RUNS_DIR)
     shutil.copy(args.config, run_dir / "config.yaml")
@@ -504,7 +527,25 @@ def main():
     try:
         print(f"Run dir: {run_dir}")
         print(f"Config source: {args.config}\n")
-        train_one_run(config, run_dir)
+
+        if args.reuse_augmented is not None:
+            train_manifest = args.reuse_augmented
+            print(f"Reusing augmented set: {train_manifest}\n")
+        else:
+            aug_out = run_dir / "augmented"
+            print(f"Augmenting into {aug_out}...")
+            aug_params = load_aug_params(args.config)
+            count = int(raw_config.get("aug_count", DEFAULT_COUNT))
+            seed = int(raw_config.get("aug_seed", DEFAULT_SEED))
+            for k, v in aug_params.items():
+                print(f"  {k}: {v}")
+            print(f"  aug_count: {count}")
+            print(f"  aug_seed: {seed}\n")
+            train_manifest = run_augment(aug_out, aug_params, count, seed,
+                                         TRAIN_SPLIT)
+            print()
+
+        train_one_run(config, run_dir, train_manifest)
     finally:
         sys.stdout = tee.stdout
         tee.close()
