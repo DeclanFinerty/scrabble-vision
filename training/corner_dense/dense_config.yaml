@@ -1,0 +1,88 @@
+# Default training config for the dense corner regressor.
+# Predicts all 256 grid intersections (15x15 board => 16x16 lines)
+# from a single 224x224 image.
+#
+# Augmentation params are shared with the 4-corner pipeline -- the
+# augmenter still produces a 4-corner manifest; dense 256-point
+# targets are computed analytically at load time from those corners.
+#
+# Each training run copies the resolved config into its run dir.
+
+# Optimiser
+lr: 1.0e-4
+batch_size: 8
+epochs: 100
+
+# Model
+backbone: mobilenetv2     # mobilenetv2 only (head is wired for the
+                          # 1280-channel feature map). Kept here for
+                          # parity with the 4-corner config; resnet18
+                          # would need a different head.
+unfreeze_layers: -1       # -1 = all trainable, 0 = fully frozen,
+                          #  N = unfreeze the last N blocks of `features`
+pool_size: 1              # AdaptiveAvgPool2d(P) in the head, applied
+                          # to the (B, 256, 7, 7) tensor that follows
+                          # the 1x1 convs. P=1 collapses to a 256-dim
+                          # summary (smallest FC); P=7 preserves the
+                          # full 7x7 grid (12,544 features). Default
+                          # is 1; raise for experiments that want the
+                          # FC to see spatial detail.
+dropout: 0.3              # Dropout applied between Flatten and the
+                          # final Linear in the head, mirroring the
+                          # 4-corner regressor. No-op at inference.
+
+# Dense-supervision loss
+# A weight of 0 disables that term's gradient contribution but the
+# unweighted penalty is still computed and printed each epoch as a
+# diagnostic. Keep dead terms in the config (rather than deleting
+# them) so historical run configs remain reproducible.
+grid_reg_weight: 0.0      # Penalize variance of consecutive-point
+                          # distances along each row + column of the
+                          # 16x16 predicted grid. Off by default: a
+                          # perspective-warped board's lattice has
+                          # unequal row/col spacing by construction,
+                          # so this term fights the true labels under
+                          # the current augmentation pipeline. Kept
+                          # at 0 so older runs can be re-run by
+                          # restoring their config.
+collinearity_weight: 0.2  # Penalize mean squared perpendicular
+                          # distance from each intermediate point to
+                          # the straight line through its row/col's
+                          # two endpoints. Encourages each row/col to
+                          # lie on a single line (a property the true
+                          # board lattice has under any perspective).
+
+# Scheduling
+lr_patience: 7            # ReduceLROnPlateau patience (epochs)
+early_stop_patience: 15   # stop after N epochs with no val improvement
+
+seed: 42
+
+# Augmentation (read by scripts/augment_corners.py)
+crop_probability: 1.0     # fraction of augmented samples that get a
+                          # random crop applied. The rest are letter-
+                          # boxed after rotate+perspective so the full
+                          # board stays visible.
+                          # default value: 1.0 (every sample cropped)
+min_board_visible: 0.60   # min fraction of the board polygon that
+                          # must remain inside the crop.
+                          # default value: 0.60
+min_corners_visible: 3    # min number of board corners that must lie
+                          # inside the crop (1-4).
+                          # default value: 4
+warp_magnitude: 0.05      # max perspective corner perturbation, as a
+                          # fraction of the image short side.
+                          # default value: 0.05
+border_mode: replicate    # border fill for the rotation+perspective
+                          # composite warp. "replicate" extends edge
+                          # pixels outward (closer to real images);
+                          # "constant" fills with black (the
+                          # historical behavior). Also accepts
+                          # "reflect" and "reflect_101".
+                          # default value: replicate
+aug_count: 80             # augmented samples generated per training
+                          # image (1 letterboxed "original" copy is
+                          # written in addition).
+                          # default value: 30
+aug_seed: 42              # rng seed for the augmentation pass.
+                          # default value: 0

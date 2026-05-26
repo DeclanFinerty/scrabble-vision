@@ -105,9 +105,9 @@ model is unavailable or produces low-confidence output.
   images of different sizes (a 50 px miss on 4032 px vs on 1300 px
   reads very differently in raw pixels). See `evaluate()` in
   `scripts/train_corners.py`.
-- Best result so far: 2.7% mean val error (run_015 -- see
-  `training/corner/CHANGELOG.md` for the per-run history). Target
-  is sub-1%.
+- Best 4-corner result: 2.7% mean val error (run_015 -- see
+  `training/corner/CHANGELOG.md` for the per-run history). The
+  4-corner regressor is now superseded by the dense regressor below.
 
 ### Training pipeline
 
@@ -134,6 +134,77 @@ model is unavailable or produces low-confidence output.
     letterboxed source, for boards where rotation augmentation would
     produce nonsense (e.g. badges, oriented text). Set via
     `scripts/set_augment_level.py`.
+
+### Dense regressor (`scripts/train_corner_dense.py`)
+
+The dense regressor replaces the 4-corner head with one that predicts
+**all 256 intersections of the 15x15 board grid** (a 16x16 lattice).
+It's the shipping corner detector.
+
+- **Targets**: the 256 dense points are computed *analytically* from
+  the existing 4 corner labels via a perspective transform from the
+  unit grid to image space (`compute_dense_targets` in
+  `scripts/train_corner_dense.py`). The augmentation pipeline is
+  shared with the 4-corner regressor unchanged -- it writes a
+  4-corner manifest; the dense targets are derived on the fly at
+  `__getitem__` time. No new labeling is required.
+- **Ordering**: row-major (`index = row * 16 + col`, row 0 at the
+  top). The 4 board corners land at indices `(0, 15, 255, 240)` for
+  TL/TR/BR/BL, so per-corner error is directly comparable against
+  the 4-corner runs.
+- **Backbone**: same MobileNetV2 trunk as the 4-corner regressor,
+  with `unfreeze_layers` honoured the same way (frozen BN forced to
+  eval mode while only later blocks train).
+- **Head**: fully-convolutional with optional spatial pooling at the
+  end --
+
+  ```
+  features (B, 1280, 7, 7)
+    -> Conv2d(1280, 512, 1x1) -> ReLU
+    -> Conv2d(512,  256, 1x1) -> ReLU
+    -> AdaptiveAvgPool2d(pool_size)
+    -> Flatten
+    -> Dropout(dropout)
+    -> Linear(256 * pool_size**2, 512)
+  ```
+
+  The 1x1 convs do per-spatial-cell channel mixing on the native
+  7x7 grid before pooling. `pool_size: 1` (default; GAP) gives the
+  smallest FC; raising it preserves more positional information at
+  the cost of head size.
+- **Loss** = `SmoothL1` on all 512 normalized outputs
+            + `grid_reg_weight` * spacing-variance penalty
+            + `collinearity_weight` * perpendicular-distance penalty.
+  Both penalties are computed on the predicted 16x16 lattice:
+  - *Spacing variance* (`grid_regularity_penalty`): for each row /
+    column, variance of the 15 consecutive-point distances. Disabled
+    by default (`grid_reg_weight: 0.0`) because perspective
+    augmentation produces labels with unequal row/column spacing, so
+    penalizing variance fights the real labels.
+  - *Collinearity* (`grid_collinearity_penalty`): for each row /
+    column, mean squared perpendicular distance from each
+    intermediate point to the line through the two endpoints.
+    True under any perspective, so always safe to apply.
+  Setting a weight to 0 zeros the gradient contribution but still
+  logs the unweighted penalty each epoch as a diagnostic; weights
+  are kept in the config (rather than removing keys) so older runs'
+  configs remain reproducible.
+- **Eval**: reports per-corner pixel + %-of-diagonal error at the 4
+  board-corner indices (for direct comparison with the 4-corner
+  runs) *and* mean error across all 256 lattice points. Both go into
+  `metrics.json`; the per-epoch console line carries both.
+- **Best result**: run_005 -- 1.7% mean corner error / 1.08% all-256
+  error on val (54 images); 5.3% / 3.2% on the held-out test set
+  (22 images). See `training/corner_dense/CHANGELOG.md` for per-run
+  notes.
+- **Run dir layout** mirrors the 4-corner pipeline:
+  `training/corner_dense/runs/run_NNN/` contains `config.yaml`,
+  `best_model.pt`, `metrics.json` (best epoch + full history),
+  `loss_curve.png` (total + base/reg/coll components),
+  `log.txt`, an `augmented/` subdir (gitignored, auto-deleted on
+  success unless `--keep-augmented`), a `predictions/` subdir from
+  `visualize_predictions_dense.py`, and one or more auto-numbered
+  `predictions_test_NN/` subdirs from `predict_test_dense.py`.
 
 ### Verification UI (`scripts/verify_corners.py`)
 
@@ -243,20 +314,23 @@ need their input/output paths updated for the new `data/` layout.
 
 ## Known limitations / planned improvements
 
-- **Corner detection training is the active focus.** Labeling
-  (`scripts/verify_corners.py` -- supports group-mode propagation,
-  flip H/V with backups to `<dataset>/original/`, and label rotation)
-  and the training loop driven by `scripts/train_corners.py` are
-  the day-to-day work. Best val error to date is 2.7% of image
-  diagonal (run_015); target is sub-1%. See
-  `training/corner/CHANGELOG.md` for per-run notes.
-- **Tile classification rebuild deferred.** The existing
-  `models/tile_classifier.pt` continues to ship; the
-  `extract_tiles.py` / `augment_tiles.py` / `train.py` /
-  `evaluate.py` / `server.py` / `web/index.html` entry points have
-  been moved into `ss/` (superseded) pending the corner work landing
-  first. References to them in the "Modules" + "Running end-to-end"
-  sections below document the legacy layout, not the current root.
+- **Corner detection is feature-complete.** The dense regressor
+  (`scripts/train_corner_dense.py`, run_005 ships) is the production
+  corner detector; the 4-corner regressor (`scripts/train_corners.py`)
+  is retained for ablation only. See `training/corner_dense/CHANGELOG.md`
+  for run notes and `data/annotations/corners.json` for the labeled
+  set. Follow-ups (from-scratch CNN comparison, ONNX export,
+  heuristic-vs-trained eval harness) live in `TODO.md`.
+- **Tile classification rebuild is the active focus.** The existing
+  `models/tile_classifier.pt` continues to ship while the rebuild
+  is in flight. `extract_tiles.py` / `augment_tiles.py` / `train.py` /
+  `evaluate.py` / `server.py` / `web/index.html` have been moved
+  into `ss/` (superseded) pending the rebuild; references to them
+  in the "Modules" + "Running end-to-end" sections document the
+  legacy layout, not the current root. The rebuild reads from the
+  new `data/raw/boards/` + `data/annotations/` + `data/extracted/tiles/`
+  layout and uses the dense regressor's perspective warp as the
+  upstream input.
 - **Corner detection failure mode.** Heuristic auto-detect can fail
   on busy backgrounds or low-contrast surfaces; the trained
   regressor is the planned replacement, with the heuristic retained

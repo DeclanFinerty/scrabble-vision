@@ -15,7 +15,6 @@ detection training push. They're parked so they don't get lost.
 
 ## Corner detection -- follow-ups
 
-- Add more labels than just the 4 corners.  For example, label every intersection on the grid.  Caled dense supervision, gives more gradient signals
 - Train a from-scratch CNN for corner detection and compare against
   MobileNetV2 transfer learning (does the pretraining actually help
   at our dataset size?).

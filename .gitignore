@@ -13,6 +13,7 @@ data/
 # Training run outputs (model weights, logs, predictions). Config
 # and CHANGELOG are tracked; per-run artifacts are not.
 training/corner/runs/
+training/corner_dense/runs/
 
 # Ad-hoc augmentation previews + sanity-check renders (script output).
 training/corner/previews/

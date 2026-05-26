@@ -68,15 +68,16 @@ generated automatically by `train_corners.py`. The legacy
                                          v
                             +--------------------------------+
                             |  train_corners.py              |
+                            |    | train_corner_dense.py     |
                             |  augments into                 |
                             |    runs/run_N/augmented/ then  |
                             |    trains -> runs/run_N/       |
                             +--------------------------------+
                                          v
                             +--------------------------------+
-                            |  visualize_predictions.py      |
+                            |  visualize_predictions{,_dense}|
                             |  per-val-image predictions     |
-                            |  predict_test.py               |
+                            |  predict_test{,_dense}         |
                             |  per-test-image predictions    |
                             +--------------------------------+
                                          v
@@ -255,6 +256,34 @@ Reads: `training/corner/corner_config.yaml`,
 Writes: `training/corner/runs/run_NNN/` (including its `augmented/`
   subdir, unless `--reuse-augmented` is given)
 
+### `train_corner_dense.py`
+The **shipping** corner regressor. Same flow as `train_corners.py`
+but with a dense head that predicts all 256 grid intersections
+(a 16x16 lattice) instead of just the 4 corners. Dense targets are
+computed analytically from the 4 verified corners via a perspective
+transform from the unit grid (`compute_dense_targets`), so no new
+labeling is required and the augmentation pipeline is reused
+unchanged (it still writes a 4-corner manifest; dense targets are
+derived at load time).
+
+Loss adds two optional terms on top of `SmoothL1`:
+- `grid_reg_weight` * variance of consecutive-point distances along
+  each row + column (penalizes uneven spacing; default 0 because
+  perspective augmentation breaks the equal-spacing assumption).
+- `collinearity_weight` * mean squared perpendicular distance from
+  each intermediate point to the row/col endpoint line (penalizes
+  curvature; safe under any perspective).
+
+Reports per-corner error at indices `(0, 15, 240, 255)` for direct
+comparison with `train_corners.py`, plus mean error across all 256
+points. `--reuse-augmented` and `--keep-augmented` behave identically
+to `train_corners.py`.
+
+Reads: `training/corner_dense/dense_config.yaml`,
+  `data/splits/corner_{train,val}.txt`, `data/annotations/corners.json`,
+  `data/raw/boards/**/*`
+Writes: `training/corner_dense/runs/run_NNN/`
+
 ## Stage 5 — Evaluate
 
 ### `visualize_predictions.py`
@@ -284,16 +313,43 @@ Reads: `<run_dir>/config.yaml`, `<run_dir>/best_model.pt`,
   `data/splits/corner_test.txt`, `data/annotations/corners.json`
 Writes: `<run_dir>/predictions_test_NN/`
 
+### `visualize_predictions_dense.py`
+Dense-model counterpart of `visualize_predictions.py`. Draws all
+256 predicted (red) and ground-truth (green) lattice points on each
+val image, with the 4 board corners (indices 0, 15, 240, 255) drawn
+larger; faint row + column polylines make the grid structure visible
+even when individual dots are tiny. GT is derived from the 4-corner
+labels via `compute_dense_targets`, so it's the exact target the
+model was trained against. Per-image table prints both the 4-corner
+error (for comparison with the 4-corner regressor) and the full
+256-point mean.
+
+Reads: `<run_dir>/config.yaml`, `<run_dir>/best_model.pt`,
+  `data/splits/corner_val.txt`, `data/annotations/corners.json`
+Writes: `<run_dir>/predictions/<stem>.jpg`,
+  `<run_dir>/predictions/summary.jpg`
+
+### `predict_test_dense.py`
+Dense-model counterpart of `predict_test.py`: same output layout
+(`<run_dir>/predictions_test_NN/`) and same don't-peek-at-the-
+test-set discipline. `metrics.json` records both corner-only and
+all-256 aggregates.
+
+Reads: `<run_dir>/config.yaml`, `<run_dir>/best_model.pt`,
+  `data/splits/corner_test.txt`, `data/annotations/corners.json`
+Writes: `<run_dir>/predictions_test_NN/`
+
 ## Stage 6 — Cleanup
 
 ### `clean_augmented.py`
 Deletes the augmented training JPEGs (`runs/run_NNN/augmented/corner_train/`)
 from one or more runs to reclaim disk space. Keeps the
 `corner_manifest.csv` so labels + filenames are still reproducible.
-`train_corners.py` runs this automatically on a successful training;
-use the standalone script for older runs or after `--keep-augmented`.
+Both `train_corners.py` and `train_corner_dense.py` run this
+automatically on a successful training; use the standalone script
+for older runs or after `--keep-augmented`.
 
-Reads: `training/corner/runs/run_*/augmented/corner_train/`
+Reads: `training/corner{,_dense}/runs/run_*/augmented/corner_train/`
 Writes: removes that directory (manifest CSV untouched)
 
 ## Quick-reference: order of script invocation for new data
@@ -319,9 +375,16 @@ uv run scripts/make_splits.py --seed 42 --val-unique-count 3
 uv run scripts/augment_corners.py --count 30 --seed 42
 uv run scripts/sanity_check_corners.py --seed 42   # optional eyeball
 
-# 5. Train + visualize
+# 5. Train + visualize (shipping dense model)
+uv run scripts/train_corner_dense.py
+uv run scripts/visualize_predictions_dense.py training/corner_dense/runs/run_NNN
+# Only after the val numbers look good, peek at the test set once:
+uv run scripts/predict_test_dense.py training/corner_dense/runs/run_NNN
+
+# 5b. Or the 4-corner ablation pipeline (same data, different head):
 uv run scripts/train_corners.py
 uv run scripts/visualize_predictions.py training/corner/runs/run_NNN
+uv run scripts/predict_test.py training/corner/runs/run_NNN
 ```
 
 If you only need to re-train (config tweaks, no new data) start at

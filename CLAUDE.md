@@ -22,15 +22,15 @@ day-to-day conventions for contributing.
 uv sync                                                # install deps
 ```
 
-The active corner-detection pipeline lives under `scripts/`; see
-`scripts/README.md` for the full per-stage tour (intake -> labeling
--> training-set build -> train -> evaluate). The legacy tile-
-classification + web-UI entry points (`scan.py`, `server.py`,
-`evaluate.py`, `train.py`, `extract_tiles.py`, `web/index.html`,
-`retrain.bat`, `start_mobile.bat`) have been moved to `ss/`
-(superseded) while the corner regressor lands; the shipped
-`models/tile_classifier.pt` is still used by anything that pulls
-the tile classifier directly.
+Corner detection is feature-complete; the tile classification
+rebuild is the current focus. The corner pipeline lives under
+`scripts/`; see `scripts/README.md` for the full per-stage tour
+(intake -> labeling -> training-set build -> train -> evaluate).
+The legacy tile-classification + web-UI entry points (`scan.py`,
+`server.py`, `evaluate.py`, `train.py`, `extract_tiles.py`,
+`web/index.html`, `retrain.bat`, `start_mobile.bat`) have been
+moved to `ss/` (superseded); the shipped `models/tile_classifier.pt`
+is still used by anything that pulls the tile classifier directly.
 
 ## Pipeline scripts
 
@@ -46,20 +46,40 @@ import_coco_dataset.py / rename_coco_files.py   # intake
   -> set_augment_level.py                       # full vs color_only
   -> make_splits.py                             # train/val/test
   -> augment_corners.py                         # build augmented set
-  -> train_corners.py                           # train -> runs/run_NNN
-  -> visualize_predictions.py                   # eyeball predictions
+  -> train_corners.py    | train_corner_dense.py
+                                                # train -> runs/run_NNN
+  -> visualize_predictions.py |
+     visualize_predictions_dense.py             # eyeball val predictions
+  -> predict_test.py | predict_test_dense.py    # held-out test eval
 ```
+
+The `_dense` variants are the **shipping** corner regressor
+(predicts all 256 grid intersections, not just 4 corners). The
+4-corner scripts (`train_corners.py`, `visualize_predictions.py`,
+`predict_test.py`) are kept for ablations and share all upstream
+labeling, board grouping, augmentation, and split tooling with the
+dense scripts -- both pipelines read `data/annotations/corners.json`
++ `data/splits/`. The dense run dir is `training/corner_dense/runs/`;
+its layout (`config.yaml`, `best_model.pt`, `metrics.json`,
+`loss_curve.png`, `log.txt`, `augmented/`, `predictions/`,
+`predictions_test_NN/`) mirrors `training/corner/runs/`.
 
 When you add a script to `scripts/`, update `scripts/README.md` at
 the same commit so this reference doesn't rot.
 
 ## Tests
 There is no automated test suite. Validation is manual:
-- For corner regressor changes, run `scripts/train_corners.py`
+- For dense regressor changes, run `scripts/train_corner_dense.py`
   (a short epoch budget is fine for smoke-testing the pipeline)
-  and then `scripts/visualize_predictions.py training/corner/runs/run_NNN`
-  to eyeball whether the predicted corners land on the right
-  physical board corners across the val set.
+  and then `scripts/visualize_predictions_dense.py
+  training/corner_dense/runs/run_NNN` to eyeball whether the
+  predicted 256-point lattice lands on the real grid lines across
+  the val set. Use `scripts/predict_test_dense.py` against the test
+  split only once a candidate looks good on val -- the test set is
+  meant to be peeked at sparingly.
+- For 4-corner regressor changes (`scripts/train_corners.py`):
+  same flow with `scripts/visualize_predictions.py` and
+  `scripts/predict_test.py`.
 - For augmentation changes, `scripts/sanity_check_corners.py`
   draws the manifest's normalized coords onto a sample of augmented
   images and reports min/max coord ranges; catches labeling math
@@ -148,43 +168,60 @@ scripts to point at the new `data/raw/boards/`,
 
 ## Corner detection training
 
-The corner regressor (MobileNetV2 backbone + spatial-pool regression
-head -- see `SPEC.md` for the architecture) lives under
-`training/corner/`:
+Two training surfaces share the same upstream data pipeline:
 
 ```
-training/corner/
-  corner_config.yaml  # default training config
-  CHANGELOG.md        # what changed between runs, newest first
-  runs/run_NNN/       # per-run config snapshot, weights, metrics,
-                      # predictions/  -- gitignored
+training/corner/                          training/corner_dense/
+  corner_config.yaml                        dense_config.yaml
+  CHANGELOG.md                              CHANGELOG.md
+  runs/run_NNN/  (gitignored)               runs/run_NNN/  (gitignored)
 ```
 
-Running is via the top-level scripts (see `scripts/README.md` for
-the full pipeline reference):
+- `training/corner_dense/` -- **shipping** model. Dense supervision
+  on all 256 grid intersections, fully-conv head. Driven by
+  `scripts/train_corner_dense.py`. See `SPEC.md`'s "Dense regressor"
+  section for the architecture and loss.
+- `training/corner/` -- 4-corner regressor; kept for ablations.
+  Driven by `scripts/train_corners.py`.
+
+Running:
 
 ```bash
-uv run scripts/train_corners.py                                    # default config
-uv run scripts/train_corners.py --config path/to/some.yaml         # override
+# Shipping pipeline:
+uv run scripts/train_corner_dense.py                                       # default config
+uv run scripts/train_corner_dense.py --config path/to/some.yaml            # override
+uv run scripts/visualize_predictions_dense.py training/corner_dense/runs/run_NNN
+uv run scripts/predict_test_dense.py training/corner_dense/runs/run_NNN
+
+# 4-corner ablation pipeline:
+uv run scripts/train_corners.py
 uv run scripts/visualize_predictions.py training/corner/runs/run_NNN
+uv run scripts/predict_test.py training/corner/runs/run_NNN
 ```
 
-Each `train_corners.py` invocation creates a fresh
-`training/corner/runs/run_NNN/` (auto-incremented) and copies the
-resolved config into it. Don't mutate an existing run directory --
-start a new one.
+Each `train_*` invocation creates a fresh `runs/run_NNN/`
+(auto-incremented) and copies the resolved config into it. Don't
+mutate an existing run directory -- start a new one. Don't peek at
+the test set: only run `predict_test*` once a candidate looks good
+on val.
 
 Config conventions:
-- `corner_config.yaml` holds the canonical defaults; keep it minimal
-  and human-readable.
+- `corner_config.yaml` / `dense_config.yaml` hold the canonical
+  defaults; keep them minimal and human-readable.
 - Experiment variants are separate YAML files (anywhere on disk),
   passed with `--config <path>`.
 - Anything that affects the trained weights (augmentation params,
-  optimizer, split seed, epochs, pool_size, unfreeze_layers) must
-  come from the config -- no hidden defaults baked into the code.
+  optimizer, split seed, epochs, pool_size, dropout,
+  unfreeze_layers, grid_reg_weight, collinearity_weight) must come
+  from the config -- no hidden defaults baked into the code.
 - After every meaningful run, append a `## run_NNN -- <title>` entry
-  to `training/corner/CHANGELOG.md` explaining what changed and what
-  the result was. Newest entries at the top.
+  to the relevant `CHANGELOG.md` (`training/corner_dense/` or
+  `training/corner/`) explaining what changed and what the result
+  was. Newest entries at the top.
+- Setting `grid_reg_weight` or `collinearity_weight` to 0 disables
+  that term's gradient contribution but keeps it logged each epoch
+  as a diagnostic; prefer zeroing the weight over deleting the key
+  so historical configs remain reproducible.
 
 ### Board-level split rule
 
